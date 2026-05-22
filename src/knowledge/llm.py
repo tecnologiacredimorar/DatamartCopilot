@@ -49,6 +49,34 @@ def _ensure_dict(parsed: Any) -> dict[str, Any]:
     return {"value": parsed}
 
 
+def _find_json_value(text: str, open_char: str, close_char: str) -> Optional[str]:
+    """Find the outermost JSON object/array, correctly skipping { and } inside quoted strings."""
+    start = text.find(open_char)
+    if start == -1:
+        return None
+    depth = 0
+    in_string = False
+    escape_next = False
+    i = start
+    while i < len(text):
+        ch = text[i]
+        if escape_next:
+            escape_next = False
+        elif ch == "\\" and in_string:
+            escape_next = True
+        elif ch == '"':
+            in_string = not in_string
+        elif not in_string:
+            if ch == open_char:
+                depth += 1
+            elif ch == close_char:
+                depth -= 1
+                if depth == 0:
+                    return text[start : i + 1]
+        i += 1
+    return None
+
+
 def _extract_json_object(raw: str) -> dict[str, Any]:
     """Extract a JSON object from raw AI text using the same 4-strategy cascade
     as call_ai_json, but without appending any extra instruction to the prompt.
@@ -72,35 +100,21 @@ def _extract_json_object(raw: str) -> dict[str, Any]:
     except json.JSONDecodeError:
         pass
 
-    # 3. Brace-count: find outermost {...}
-    start = stripped.find("{")
-    if start != -1:
-        depth = 0
-        for i, ch in enumerate(stripped[start:], start):
-            if ch == "{":
-                depth += 1
-            elif ch == "}":
-                depth -= 1
-                if depth == 0:
-                    try:
-                        return _ensure_dict(json.loads(stripped[start : i + 1]))
-                    except json.JSONDecodeError:
-                        break
+    # 3. String-aware scan for outermost {...}
+    candidate = _find_json_value(stripped, "{", "}")
+    if candidate:
+        try:
+            return _ensure_dict(json.loads(candidate))
+        except json.JSONDecodeError:
+            pass
 
-    # 4. Bracket-count: find outermost [...]
-    start = stripped.find("[")
-    if start != -1:
-        depth = 0
-        for i, ch in enumerate(stripped[start:], start):
-            if ch == "[":
-                depth += 1
-            elif ch == "]":
-                depth -= 1
-                if depth == 0:
-                    try:
-                        return _ensure_dict(json.loads(stripped[start : i + 1]))
-                    except json.JSONDecodeError:
-                        break
+    # 4. String-aware scan for outermost [...]
+    candidate = _find_json_value(stripped, "[", "]")
+    if candidate:
+        try:
+            return _ensure_dict(json.loads(candidate))
+        except json.JSONDecodeError:
+            pass
 
     logger.error("_extract_json_object failed. Raw (first 500):\n%s", raw[:500])
     raise ValueError(f"Não foi possível extrair JSON da resposta. Início: {raw[:300]}")
@@ -139,35 +153,21 @@ def call_ai_json(prompt: str, system: str = "", max_tokens: int = MAX_OUTPUT_TOK
     except json.JSONDecodeError:
         pass
 
-    # 3. Brace-count to find outermost {...}
-    start = stripped.find("{")
-    if start != -1:
-        depth = 0
-        for i, ch in enumerate(stripped[start:], start):
-            if ch == "{":
-                depth += 1
-            elif ch == "}":
-                depth -= 1
-                if depth == 0:
-                    try:
-                        return _ensure_dict(json.loads(stripped[start : i + 1]))
-                    except json.JSONDecodeError:
-                        break
+    # 3. String-aware scan for outermost {...}
+    candidate = _find_json_value(stripped, "{", "}")
+    if candidate:
+        try:
+            return _ensure_dict(json.loads(candidate))
+        except json.JSONDecodeError:
+            pass
 
-    # 4. Bracket-count to find outermost [...]
-    start = stripped.find("[")
-    if start != -1:
-        depth = 0
-        for i, ch in enumerate(stripped[start:], start):
-            if ch == "[":
-                depth += 1
-            elif ch == "]":
-                depth -= 1
-                if depth == 0:
-                    try:
-                        return _ensure_dict(json.loads(stripped[start : i + 1]))
-                    except json.JSONDecodeError:
-                        break
+    # 4. String-aware scan for outermost [...]
+    candidate = _find_json_value(stripped, "[", "]")
+    if candidate:
+        try:
+            return _ensure_dict(json.loads(candidate))
+        except json.JSONDecodeError:
+            pass
 
     logger.error("JSON parse failed. Raw response (first 500 chars):\n%s", raw[:500])
     raise ValueError(

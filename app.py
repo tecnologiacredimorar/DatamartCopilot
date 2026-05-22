@@ -1196,12 +1196,11 @@ elif page == "🚀 Acelerador":
                     if persisted_design and persisted_design.get("fact_table"):
                         st.session_state[design_key] = persisted_design
 
-                # Only call the AI when there is genuinely no design yet,
-                # or the previous attempt returned an explicit error.
-                # Do NOT invalidate just because fact_table is empty — that
-                # creates an infinite loop where every rerun pops and retriggers.
+                # Only call the AI when there is genuinely no design yet.
+                # Errors stay visible until the user explicitly clicks Retry/Reprocess
+                # (those buttons pop the key, setting cached=None here on the next render).
                 cached = st.session_state.get(design_key)
-                needs_generation = cached is None or "error" in cached or "_raw" in cached
+                needs_generation = cached is None
 
                 if needs_generation:
                     with st.spinner("Desenhando star schema Kimball... (pode levar ~30s)"):

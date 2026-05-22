@@ -133,37 +133,43 @@ O JSON deve ter EXATAMENTE estas chaves no nível raiz:
 
 Use nomes reais do domínio, não placeholders. Dimensões conformed devem ter conformed: true."""
 
-        try:
-            raw = call_ai(prompt, SYSTEM, max_tokens=4000)
-            logger.info("design_star_schema raw response length: %d chars", len(raw))
-            result = _extract_json_object(raw)
-
-            # AI sometimes wraps the schema one level deeper, e.g.:
-            # {"design": {"fact_table": ..., "dimensions": [...]}}
-            # Walk the top-level values to find the real schema dict.
-            if not result.get("fact_table"):
-                for v in result.values():
-                    if isinstance(v, dict) and v.get("fact_table"):
-                        result = v
-                        break
-
-            if result.get("fact_table"):
-                self.brain.update_request(
-                    request_id,
-                    design_json=json.dumps(result, ensure_ascii=False),
-                    status="designing",
+        for attempt in range(1, 3):
+            try:
+                raw = call_ai(prompt, SYSTEM, max_tokens=8000)
+                logger.info(
+                    "design_star_schema attempt %d: raw response length=%d chars",
+                    attempt, len(raw),
                 )
-                return result
+                result = _extract_json_object(raw)
 
-            # Still no fact_table — return the full raw so the debug expander is useful
-            logger.error(
-                "design_star_schema: fact_table missing. Raw length=%d, first 800:\n%s",
-                len(raw), raw[:800],
-            )
-            return {"error": "A IA não retornou um star schema completo.", "_raw_response": raw}
-        except Exception as e:
-            logger.error("Star schema design failed: %s", e)
-            return {"error": str(e)}
+                # AI sometimes wraps the schema one level deeper, e.g.:
+                # {"design": {"fact_table": ..., "dimensions": [...]}}
+                if not result.get("fact_table"):
+                    for v in result.values():
+                        if isinstance(v, dict) and v.get("fact_table"):
+                            result = v
+                            break
+
+                if result.get("fact_table"):
+                    self.brain.update_request(
+                        request_id,
+                        design_json=json.dumps(result, ensure_ascii=False),
+                        status="designing",
+                    )
+                    return result
+
+                logger.warning(
+                    "design_star_schema attempt %d: fact_table missing. Raw length=%d, first 800:\n%s",
+                    attempt, len(raw), raw[:800],
+                )
+                if attempt == 2:
+                    return {"error": "A IA não retornou um star schema completo.", "_raw_response": raw}
+                # retry automatically
+            except Exception as e:
+                logger.error("Star schema design attempt %d failed: %s", attempt, e)
+                if attempt == 2:
+                    return {"error": str(e)}
+        return {"error": "A IA não retornou um star schema completo."}
 
     # ── Step 4: Generate full package ──────────────────────────────────────
 
