@@ -121,7 +121,8 @@ class KnowledgeBrain:
                     updated_at          TIMESTAMP DEFAULT CURRENT_TIMESTAMP
                 );
             """)
-            # Migration: add analysis_json if upgrading from older schema
+        # executescript() issues its own COMMIT, so run migrations in a fresh connection
+        with self._conn() as conn:
             try:
                 conn.execute(
                     "ALTER TABLE kb_datamart_requests ADD COLUMN analysis_json TEXT"
