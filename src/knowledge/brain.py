@@ -121,6 +121,13 @@ class KnowledgeBrain:
                     updated_at          TIMESTAMP DEFAULT CURRENT_TIMESTAMP
                 );
             """)
+            # Migration: add analysis_json if upgrading from older schema
+            try:
+                conn.execute(
+                    "ALTER TABLE kb_datamart_requests ADD COLUMN analysis_json TEXT"
+                )
+            except Exception:
+                pass  # column already exists
 
     # ── DW Tables ──────────────────────────────────────────────────────────
 
@@ -381,11 +388,11 @@ class KnowledgeBrain:
         if not row:
             return None
         d = dict(row)
-        for field in ("clarification_qa", "artifacts"):
+        for field, default in (("clarification_qa", "[]"), ("artifacts", "{}"), ("analysis_json", "{}")):
             try:
-                d[field] = json.loads(d[field] or "{}" if field == "artifacts" else "[]")
+                d[field] = json.loads(d[field] or default)
             except Exception:
-                d[field] = {} if field == "artifacts" else []
+                d[field] = {} if field in ("artifacts", "analysis_json") else []
         return d
 
     def get_all_requests(self) -> list[dict[str, Any]]:

@@ -68,6 +68,7 @@ Máximo 3 perguntas. Só pergunte o que é realmente ambíguo."""
                 status="clarifying" if result.get("perguntas") else "designing",
                 brain_context_used=brain_ctx[:1000],
                 kimball_notes=result.get("entendimento", ""),
+                analysis_json=json.dumps(result, ensure_ascii=False),
             )
             return result
         except Exception as e:
@@ -92,9 +93,15 @@ Máximo 3 perguntas. Só pergunte o que é realmente ambíguo."""
         if not req:
             return {"error": "Solicitação não encontrada."}
 
+        # Restore analysis from brain if caller passed an empty dict (e.g. after page reload)
+        if not analysis and req.get("analysis_json"):
+            persisted = req["analysis_json"]
+            analysis = persisted if isinstance(persisted, dict) else {}
+
         qa_text = ""
-        if req.get("clarification_qa"):
-            qa_pairs = req["clarification_qa"] if isinstance(req["clarification_qa"], list) else []
+        raw_qa = req.get("clarification_qa", [])
+        qa_pairs = raw_qa if isinstance(raw_qa, list) else []
+        if qa_pairs:
             qa_text = "\n".join(f"P: {q['question']}\nR: {q['answer']}" for q in qa_pairs)
 
         prompt = f"""## Solicitação

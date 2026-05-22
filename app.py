@@ -1146,8 +1146,12 @@ elif page == "🚀 Acelerador":
 
             analysis = st.session_state.get(f"analysis_{req_id}")
             if not analysis:
-                if status in ("clarifying", "designing", "ready"):
-                    st.info("Análise já realizada. Veja abaixo.")
+                # Restore from brain (persisted in analyze_demand) after page reload
+                persisted = req.get("analysis_json", {})
+                if persisted and isinstance(persisted, dict):
+                    analysis = persisted
+                    st.session_state[f"analysis_{req_id}"] = analysis
+                elif status in ("clarifying", "designing", "ready"):
                     analysis = {}
 
             if analysis:
