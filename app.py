@@ -1186,17 +1186,32 @@ elif page == "🚀 Acelerador":
 
             # ── Step: designing ─────────────────────────────────────────
             elif status == "designing":
+                # Invalidate a cached design that is a parse-failure placeholder
+                cached = st.session_state.get(f"design_{req_id}", {})
+                if "_raw" in cached or not cached.get("fact_table"):
+                    st.session_state.pop(f"design_{req_id}", None)
+
                 if f"design_{req_id}" not in st.session_state:
                     with st.spinner("Desenhando star schema Kimball..."):
-                        design = accelerator.design_star_schema(req_id, analysis or {})
+                        try:
+                            design = accelerator.design_star_schema(req_id, analysis or {})
+                        except Exception as exc:
+                            design = {"error": str(exc)}
                         st.session_state[f"design_{req_id}"] = design
-                        brain.update_request(req_id, status="designing")
 
                 design = st.session_state.get(f"design_{req_id}", {})
-                if design and "error" not in design:
+
+                if design.get("error"):
+                    st.error(f"Erro ao gerar design: {design['error']}")
+                    if st.button("🔄 Tentar novamente"):
+                        st.session_state.pop(f"design_{req_id}", None)
+                        st.rerun()
+                elif design.get("fact_table"):
                     st.subheader("⭐ Design Star Schema")
-                    fact = design.get("fact_table", {})
-                    st.markdown(f"**Fact:** `{fact.get('name','?')}` — Grain: _{fact.get('grain','?')}_")
+                    fact = design["fact_table"]
+                    fname = fact.get("name") or "?"
+                    fgrain = fact.get("grain") or "?"
+                    st.markdown(f"**Fact:** `{fname}` — Grain: _{fgrain}_")
                     st.markdown(f"**Tipo:** {fact.get('type','?')}")
 
                     if fact.get("measures"):
@@ -1206,10 +1221,10 @@ elif page == "🚀 Acelerador":
 
                     if design.get("dimensions"):
                         st.markdown("**Dimensões:**")
-                        for d in design["dimensions"]:
-                            conformed = " ⭐ conformada" if d.get("conformed") else ""
-                            st.markdown(f"- **{d.get('name')}** — SCD Type {d.get('scd_type',1)}{conformed}")
-                            st.caption(f"  {d.get('rationale','')}")
+                        for dim in design["dimensions"]:
+                            conformed = " ⭐ conformada" if dim.get("conformed") else ""
+                            st.markdown(f"- **{dim.get('name')}** — SCD Type {dim.get('scd_type',1)}{conformed}")
+                            st.caption(f"  {dim.get('rationale','')}")
 
                     if design.get("kimball_notes"):
                         st.info(f"**Notas Kimball:** {design['kimball_notes']}")
@@ -1226,8 +1241,11 @@ elif page == "🚀 Acelerador":
                         st.session_state.pop(f"design_{req_id}", None)
                         brain.update_request(req_id, status="analyzing")
                         st.rerun()
-                elif design.get("error"):
-                    st.error(design["error"])
+                else:
+                    st.warning("Design ainda sendo processado ou sem dados. Tente recarregar.")
+                    if st.button("🔄 Reprocessar"):
+                        st.session_state.pop(f"design_{req_id}", None)
+                        st.rerun()
 
             # ── Step: ready ─────────────────────────────────────────────
             elif status == "ready":

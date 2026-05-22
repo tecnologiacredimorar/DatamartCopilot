@@ -41,34 +41,71 @@ def call_ai(prompt: str, system: str = "", max_tokens: int = MAX_OUTPUT_TOKENS) 
 
 
 def call_ai_json(prompt: str, system: str = "", max_tokens: int = MAX_OUTPUT_TOKENS) -> dict[str, Any]:
-    """Call AI and parse JSON from the response."""
-    full_prompt = prompt + "\n\nResponda SOMENTE com JSON válido, sem texto antes ou depois."
-    result = call_ai(full_prompt, system, max_tokens)
+    """Call AI and parse JSON from the response.
 
-    # Try direct parse
+    Tries four extraction strategies in order:
+    1. Direct json.loads on the stripped response
+    2. Strip markdown fences (```json ... ```) then parse
+    3. Brace-counting to find the outermost {...} object
+    4. Bracket-counting to find the outermost [...] array
+    Raises ValueError with the raw response excerpt if all strategies fail.
+    """
+    full_prompt = (
+        prompt
+        + "\n\nIMPORTANTE: Responda SOMENTE com JSON válido."
+        " Não use markdown fences (```). Não escreva nada antes ou depois do JSON."
+    )
+    raw = call_ai(full_prompt, system, max_tokens)
+    stripped = raw.strip()
+
+    # 1. Direct parse
     try:
-        return json.loads(result)
+        return json.loads(stripped)
     except json.JSONDecodeError:
         pass
 
-    # Try to extract JSON block from markdown
-    match = re.search(r"```(?:json)?\s*(\{.*?\}|\[.*?\])\s*```", result, re.DOTALL)
-    if match:
-        try:
-            return json.loads(match.group(1))
-        except json.JSONDecodeError:
-            pass
+    # 2. Strip markdown fences
+    clean = re.sub(r"^```(?:json)?\s*", "", stripped, flags=re.MULTILINE)
+    clean = re.sub(r"\s*```\s*$", "", clean, flags=re.MULTILINE).strip()
+    try:
+        return json.loads(clean)
+    except json.JSONDecodeError:
+        pass
 
-    # Try to find any JSON object/array
-    match = re.search(r"(\{.*\}|\[.*\])", result, re.DOTALL)
-    if match:
-        try:
-            return json.loads(match.group(1))
-        except json.JSONDecodeError:
-            pass
+    # 3. Brace-count to find outermost {...}
+    start = stripped.find("{")
+    if start != -1:
+        depth = 0
+        for i, ch in enumerate(stripped[start:], start):
+            if ch == "{":
+                depth += 1
+            elif ch == "}":
+                depth -= 1
+                if depth == 0:
+                    try:
+                        return json.loads(stripped[start : i + 1])
+                    except json.JSONDecodeError:
+                        break
 
-    logger.warning("Could not parse JSON from AI response, returning raw")
-    return {"_raw": result}
+    # 4. Bracket-count to find outermost [...]
+    start = stripped.find("[")
+    if start != -1:
+        depth = 0
+        for i, ch in enumerate(stripped[start:], start):
+            if ch == "[":
+                depth += 1
+            elif ch == "]":
+                depth -= 1
+                if depth == 0:
+                    try:
+                        return json.loads(stripped[start : i + 1])
+                    except json.JSONDecodeError:
+                        break
+
+    logger.error("JSON parse failed. Raw response (first 500 chars):\n%s", raw[:500])
+    raise ValueError(
+        f"A IA não retornou JSON válido. Início da resposta: {raw[:300]}"
+    )
 
 
 def call_ai_stream(
