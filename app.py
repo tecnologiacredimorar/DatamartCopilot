@@ -2,10 +2,9 @@ from __future__ import annotations
 
 import json
 import os
-import tempfile
-from pathlib import Path
 from typing import Any
 
+import pandas as pd
 import streamlit as st
 from dotenv import load_dotenv
 
@@ -18,22 +17,40 @@ st.set_page_config(
     initial_sidebar_state="expanded",
 )
 
-# ─── Session state initialization ────────────────────────────────────────────
+# ─── Persistence ──────────────────────────────────────────────────────────────
+
+@st.cache_resource
+def get_store():
+    from src.persistence.store import CopilotStore
+    return CopilotStore()
+
+store = get_store()
+
+# ─── Session state — load from SQLite on first run ────────────────────────────
 
 def _init_state() -> None:
-    defaults: dict[str, Any] = {
-        "agent": None,
-        "connections": {},
-        "active_connection": None,
-        "adf_pipelines": [],
-        "messages": [],
-        "schema_cache": {},
-        "generated_models": [],
-        "api_key": os.getenv("ANTHROPIC_API_KEY", ""),
-    }
-    for key, val in defaults.items():
-        if key not in st.session_state:
-            st.session_state[key] = val
+    if "initialized" in st.session_state:
+        return
+
+    st.session_state.initialized = True
+    st.session_state.connections = {}          # name -> connector instance
+    st.session_state.connection_configs = {}   # name -> config dict (for display)
+    st.session_state.active_connection = None
+    st.session_state.adf_pipelines = []
+    st.session_state.messages = store.load_messages()
+    st.session_state.schema_cache = {}
+    st.session_state.generated_models = []
+    st.session_state.api_key = store.get_setting("api_key", os.getenv("ANTHROPIC_API_KEY", ""))
+    st.session_state.agent = None
+
+    # Restore saved connection configs (don't auto-connect — just restore metadata)
+    for cfg in store.load_connections():
+        st.session_state.connection_configs[cfg["name"]] = cfg
+
+    # Restore active connection name
+    last_active = store.get_setting("active_connection", "")
+    if last_active and last_active in st.session_state.connection_configs:
+        st.session_state.active_connection = last_active
 
 _init_state()
 
@@ -41,13 +58,48 @@ _init_state()
 
 def get_agent():
     from src.agents.copilot_agent import DatamartCopilotAgent
-
     if st.session_state.agent is None:
         if not st.session_state.api_key:
-            st.error("Set your ANTHROPIC_API_KEY in the sidebar or .env file.")
+            st.error("Informe sua ANTHROPIC_API_KEY na barra lateral ou no arquivo .env.")
             st.stop()
         st.session_state.agent = DatamartCopilotAgent(st.session_state.api_key)
+
+        # Re-attach any already-connected connectors
+        for name, connector in st.session_state.connections.items():
+            st.session_state.agent.add_connector(name, connector)
+        if st.session_state.active_connection and st.session_state.active_connection in st.session_state.connections:
+            st.session_state.agent.set_active_connector(st.session_state.active_connection)
+
+        # Restore star schemas from SQLite
+        for sname, sdict in store.load_star_schemas().items():
+            try:
+                from src.models.schemas import StarSchema
+                st.session_state.agent._star_schemas[sname] = StarSchema(**sdict)
+            except Exception:
+                pass
+
     return st.session_state.agent
+
+
+def _reconnect(name: str) -> bool:
+    """Try to re-establish a live connector from stored config."""
+    cfg = st.session_state.connection_configs.get(name)
+    if not cfg:
+        return False
+    try:
+        if cfg["db_type"] == "azure_sql":
+            from src.connectors.azure_sql import AzureSQLConnector
+            c = AzureSQLConnector(cfg["host"], cfg["database"], cfg["username"], cfg["password"], cfg.get("driver", "ODBC Driver 18 for SQL Server"))
+        else:
+            from src.connectors.postgresql import PostgreSQLConnector
+            c = PostgreSQLConnector(cfg["host"], int(cfg.get("port", 5432)), cfg["database"], cfg["username"], cfg["password"])
+        c.connect()
+        st.session_state.connections[name] = c
+        if st.session_state.agent:
+            st.session_state.agent.add_connector(name, c)
+        return True
+    except Exception:
+        return False
 
 
 # ─── Sidebar ──────────────────────────────────────────────────────────────────
@@ -66,327 +118,573 @@ with st.sidebar:
     if api_key_input != st.session_state.api_key:
         st.session_state.api_key = api_key_input
         st.session_state.agent = None
+        store.set_setting("api_key", api_key_input)
 
     st.divider()
     page = st.radio(
-        "Navigation",
+        "Navegação",
         [
             "💬 Copilot Chat",
-            "🔌 Connections",
+            "🔌 Conexões",
             "📋 ADF Analyzer",
             "🗄️ DW Explorer",
-            "📦 Generated Models",
+            "📦 Modelos Gerados",
         ],
         label_visibility="collapsed",
     )
 
-    if st.session_state.active_connection:
-        st.success(f"Connected: {st.session_state.active_connection}")
+    # Connection status
+    st.divider()
+    if st.session_state.connection_configs:
+        st.markdown("**Bancos configurados:**")
+        for cname, cfg in st.session_state.connection_configs.items():
+            is_live = cname in st.session_state.connections
+            is_active = cname == st.session_state.active_connection
+            icon = "🟢" if (is_live and is_active) else ("🟡" if is_live else "🔴")
+            label = f"{icon} **{cname}** ({'ativo' if is_active else cfg['db_type']})"
+            col1, col2 = st.columns([3, 1])
+            col1.markdown(label)
+            if not is_active and col2.button("✓", key=f"set_active_{cname}", help="Ativar"):
+                if cname not in st.session_state.connections:
+                    with st.spinner(f"Reconectando {cname}..."):
+                        _reconnect(cname)
+                st.session_state.active_connection = cname
+                store.set_setting("active_connection", cname)
+                if st.session_state.agent and cname in st.session_state.connections:
+                    st.session_state.agent.set_active_connector(cname)
+                st.rerun()
     else:
-        st.info("No database connected")
+        st.info("Nenhum banco conectado")
 
-    if st.button("Reset Conversation", use_container_width=True):
+    if st.button("🗑️ Limpar conversa", use_container_width=True):
         st.session_state.messages = []
+        store.clear_messages()
         if st.session_state.agent:
             st.session_state.agent.reset_conversation()
         st.rerun()
 
-# ─── Pages ────────────────────────────────────────────────────────────────────
+# ─────────────────────────────────────────────────────────────────────────────
+# PAGE: Chat
+# ─────────────────────────────────────────────────────────────────────────────
 
 if page == "💬 Copilot Chat":
-    st.header("💬 DataMart Copilot Chat")
+    st.header("💬 DataMart Copilot")
     st.caption(
-        "Ask anything about your data warehouse. I'll analyze your schema, "
-        "design star schemas following Kimball methodology, and generate dbt models."
+        "Pergunte sobre seu DW, peça modelagens, diagramas, queries otimizadas e modelos dbt."
     )
+
+    # Active connection banner
+    if st.session_state.active_connection:
+        cfg = st.session_state.connection_configs.get(st.session_state.active_connection, {})
+        is_live = st.session_state.active_connection in st.session_state.connections
+        status = "🟢 conectado" if is_live else "🔴 desconectado"
+        st.info(
+            f"Banco ativo: **{st.session_state.active_connection}** "
+            f"(`{cfg.get('db_type','?')}` — {cfg.get('host','?')}/{cfg.get('database','?')}) {status}"
+        )
+    else:
+        st.warning("Nenhum banco ativo. Configure uma conexão na aba **Conexões**.")
 
     for msg in st.session_state.messages:
         with st.chat_message(msg["role"]):
             st.markdown(msg["content"])
 
-    if prompt := st.chat_input("Ex: Preciso de um datamart de vendas por produto e região..."):
+    if prompt := st.chat_input("Ex: Crie um datamart de vendas com dimensão produto, cliente e tempo..."):
         st.session_state.messages.append({"role": "user", "content": prompt})
+        store.save_message("user", prompt)
         with st.chat_message("user"):
             st.markdown(prompt)
 
         agent = get_agent()
 
-        if st.session_state.active_connection and agent._active_connector_name is None:
-            conn_name = st.session_state.active_connection
-            if conn_name in st.session_state.connections:
-                agent.add_connector(conn_name, st.session_state.connections[conn_name])
+        # Ensure active connector is set
+        active = st.session_state.active_connection
+        if active and active in st.session_state.connections:
+            agent.set_active_connector(active)
+        elif active and active not in st.session_state.connections:
+            with st.spinner(f"Reconectando {active}..."):
+                _reconnect(active)
+            if active in st.session_state.connections:
+                agent.set_active_connector(active)
 
         with st.chat_message("assistant"):
             response_placeholder = st.empty()
             full_response = ""
-            with st.spinner("Thinking..."):
+            with st.spinner("Pensando..."):
                 try:
                     for chunk in agent.chat(prompt):
                         full_response += chunk
                         response_placeholder.markdown(full_response + "▌")
                     response_placeholder.markdown(full_response)
                 except Exception as e:
-                    full_response = f"Error: {e}"
+                    full_response = f"Erro: {e}"
                     response_placeholder.error(full_response)
 
         st.session_state.messages.append({"role": "assistant", "content": full_response})
+        store.save_message("assistant", full_response)
 
-    with st.expander("💡 Suggested prompts", expanded=False):
+        # Persist any new star schemas the agent generated
+        if agent._star_schemas:
+            for sname, sschema in agent._star_schemas.items():
+                store.save_star_schema(sname, sschema.model_dump())
+
+        st.rerun()
+
+    with st.expander("💡 Sugestões de perguntas", expanded=False):
         suggestions = [
-            "Analise meu data warehouse e mostre o Bus Matrix atual",
-            "Crie um datamart de vendas com dimensões de produto, cliente e tempo",
-            "Esta solicitação pode ser unida a algum datamart existente? Por quê?",
-            "Gere os modelos dbt completos para o datamart de pedidos",
-            "Quais KPIs posso extrair das tabelas de faturamento?",
-            "Mostre as oportunidades de dimensões conformadas no DW",
+            "Analise meu DW e mostre o Bus Matrix atual",
+            "Quais dimensões conformadas existem?",
+            "Crie um datamart de vendas por produto, cliente e período",
+            "Gere o diagrama ER do modelo de vendas",
+            "Esta solicitação pode ser unida a outro datamart existente?",
+            "Gere os modelos dbt completos com staging e mart",
+            "Quais KPIs posso extrair das tabelas de pedidos?",
+            "Mostre as oportunidades de otimização desta query",
         ]
         cols = st.columns(2)
         for i, sug in enumerate(suggestions):
             if cols[i % 2].button(sug, key=f"sug_{i}", use_container_width=True):
                 st.session_state.messages.append({"role": "user", "content": sug})
+                store.save_message("user", sug)
                 st.rerun()
 
-elif page == "🔌 Connections":
-    st.header("🔌 Database Connections")
+# ─────────────────────────────────────────────────────────────────────────────
+# PAGE: Conexões
+# ─────────────────────────────────────────────────────────────────────────────
 
-    tab1, tab2 = st.tabs(["Azure SQL", "PostgreSQL"])
+elif page == "🔌 Conexões":
+    st.header("🔌 Conexões de Banco de Dados")
+
+    tab1, tab2, tab3 = st.tabs(["➕ Azure SQL", "➕ PostgreSQL", "📋 Gerenciar"])
 
     with tab1:
         st.subheader("Azure SQL Server")
         with st.form("azure_sql_form"):
             col1, col2 = st.columns(2)
-            name = col1.text_input("Connection Name", value="azure_prod")
-            server = col2.text_input("Server", placeholder="server.database.windows.net")
-            db = col1.text_input("Database")
-            username = col2.text_input("Username")
-            password = st.text_input("Password", type="password")
-            driver = st.selectbox(
-                "ODBC Driver",
-                ["ODBC Driver 18 for SQL Server", "ODBC Driver 17 for SQL Server"],
-            )
-            submitted = st.form_submit_button("Connect", use_container_width=True)
-
-        if submitted:
-            try:
-                from src.connectors.azure_sql import AzureSQLConnector
-                connector = AzureSQLConnector(server, db, username, password, driver)
-                with st.spinner("Connecting..."):
-                    connector.connect()
-                st.session_state.connections[name] = connector
-                st.session_state.active_connection = name
-                agent = get_agent()
-                agent.add_connector(name, connector)
-                st.success(f"Connected to {name}!")
-            except Exception as e:
-                st.error(f"Connection failed: {e}")
+            name   = col1.text_input("Nome da conexão", value="azure_prod")
+            server = col2.text_input("Servidor", placeholder="server.database.windows.net")
+            db     = col1.text_input("Database")
+            user   = col2.text_input("Usuário")
+            pwd    = st.text_input("Senha", type="password")
+            driver = st.selectbox("ODBC Driver", ["ODBC Driver 18 for SQL Server", "ODBC Driver 17 for SQL Server"])
+            if st.form_submit_button("Conectar e salvar", use_container_width=True):
+                try:
+                    from src.connectors.azure_sql import AzureSQLConnector
+                    connector = AzureSQLConnector(server, db, user, pwd, driver)
+                    with st.spinner("Conectando..."):
+                        connector.connect()
+                    st.session_state.connections[name] = connector
+                    cfg = {"db_type": "azure_sql", "host": server, "database": db, "username": user, "password": pwd, "driver": driver}
+                    st.session_state.connection_configs[name] = cfg
+                    st.session_state.active_connection = name
+                    store.save_connection(name, "azure_sql", cfg)
+                    store.set_setting("active_connection", name)
+                    agent = get_agent()
+                    agent.add_connector(name, connector)
+                    st.success(f"Conectado a **{name}**!")
+                    st.rerun()
+                except Exception as e:
+                    st.error(f"Erro: {e}")
 
     with tab2:
         st.subheader("PostgreSQL")
         with st.form("postgres_form"):
             col1, col2 = st.columns(2)
-            pg_name = col1.text_input("Connection Name", value="postgres_dev")
+            pg_name = col1.text_input("Nome da conexão", value="postgres_dev")
             pg_host = col2.text_input("Host", placeholder="localhost")
-            pg_port = col1.number_input("Port", value=5432, step=1)
-            pg_db = col2.text_input("Database")
-            pg_user = col1.text_input("Username")
-            pg_pass = col2.text_input("Password", type="password")
-            pg_submitted = st.form_submit_button("Connect", use_container_width=True)
+            pg_port = col1.number_input("Porta", value=5432, step=1)
+            pg_db   = col2.text_input("Database")
+            pg_user = col1.text_input("Usuário")
+            pg_pwd  = col2.text_input("Senha", type="password")
+            if st.form_submit_button("Conectar e salvar", use_container_width=True):
+                try:
+                    from src.connectors.postgresql import PostgreSQLConnector
+                    connector = PostgreSQLConnector(pg_host, int(pg_port), pg_db, pg_user, pg_pwd)
+                    with st.spinner("Conectando..."):
+                        connector.connect()
+                    st.session_state.connections[pg_name] = connector
+                    cfg = {"db_type": "postgresql", "host": pg_host, "port": int(pg_port), "database": pg_db, "username": pg_user, "password": pg_pwd}
+                    st.session_state.connection_configs[pg_name] = cfg
+                    st.session_state.active_connection = pg_name
+                    store.save_connection(pg_name, "postgresql", cfg)
+                    store.set_setting("active_connection", pg_name)
+                    agent = get_agent()
+                    agent.add_connector(pg_name, connector)
+                    st.success(f"Conectado a **{pg_name}**!")
+                    st.rerun()
+                except Exception as e:
+                    st.error(f"Erro: {e}")
 
-        if pg_submitted:
-            try:
-                from src.connectors.postgresql import PostgreSQLConnector
-                connector = PostgreSQLConnector(pg_host, int(pg_port), pg_db, pg_user, pg_pass)
-                with st.spinner("Connecting..."):
-                    connector.connect()
-                st.session_state.connections[pg_name] = connector
-                st.session_state.active_connection = pg_name
-                agent = get_agent()
-                agent.add_connector(pg_name, connector)
-                st.success(f"Connected to {pg_name}!")
-            except Exception as e:
-                st.error(f"Connection failed: {e}")
+    with tab3:
+        st.subheader("Conexões salvas")
+        if not st.session_state.connection_configs:
+            st.info("Nenhuma conexão salva ainda.")
+        for cname, cfg in list(st.session_state.connection_configs.items()):
+            is_live   = cname in st.session_state.connections
+            is_active = cname == st.session_state.active_connection
+            with st.expander(
+                f"{'🟢' if is_live else '🔴'} **{cname}** — {cfg['db_type']} | {cfg.get('host','?')}/{cfg.get('database','?')}",
+                expanded=is_active,
+            ):
+                st.json({k: ("***" if k == "password" else v) for k, v in cfg.items()})
+                col1, col2, col3 = st.columns(3)
+                if not is_live and col1.button("Reconectar", key=f"reconn_{cname}"):
+                    with st.spinner("Reconectando..."):
+                        ok = _reconnect(cname)
+                    st.success("Reconectado!" if ok else "Falhou.")
+                    st.rerun()
+                if not is_active and col2.button("Ativar", key=f"activ_{cname}"):
+                    if not is_live:
+                        _reconnect(cname)
+                    st.session_state.active_connection = cname
+                    store.set_setting("active_connection", cname)
+                    if st.session_state.agent and cname in st.session_state.connections:
+                        st.session_state.agent.set_active_connector(cname)
+                    st.rerun()
+                if col3.button("🗑️ Remover", key=f"del_{cname}"):
+                    store.delete_connection(cname)
+                    st.session_state.connection_configs.pop(cname, None)
+                    st.session_state.connections.pop(cname, None)
+                    if st.session_state.active_connection == cname:
+                        st.session_state.active_connection = None
+                    st.rerun()
 
-    if st.session_state.connections:
-        st.divider()
-        st.subheader("Active Connections")
-        for cname in st.session_state.connections:
-            col1, col2 = st.columns([3, 1])
-            col1.write(f"**{cname}**")
-            if col2.button("Activate", key=f"act_{cname}"):
-                st.session_state.active_connection = cname
-                agent = get_agent()
-                agent.set_active_connector(cname)
-                st.rerun()
+# ─────────────────────────────────────────────────────────────────────────────
+# PAGE: ADF Analyzer
+# ─────────────────────────────────────────────────────────────────────────────
 
 elif page == "📋 ADF Analyzer":
-    st.header("📋 Azure Data Factory Analyzer")
-    st.caption("Upload ADF pipeline JSON files to analyze data lineage and flows.")
+    st.header("📋 Azure Data Factory — Analisador de Pipelines")
 
     uploaded = st.file_uploader(
-        "Upload ADF Pipeline JSON",
+        "Faça upload dos JSON de pipelines ADF",
         type="json",
         accept_multiple_files=True,
     )
-
     if uploaded:
         from src.connectors.adf_parser import ADFParser
         parser = ADFParser()
-
         for file in uploaded:
             try:
                 content = json.loads(file.read())
                 pipeline = parser.parse_pipeline(content)
                 st.session_state.adf_pipelines.append(pipeline)
-
+                store.save_adf_pipeline(pipeline.name, pipeline.model_dump())
                 if st.session_state.agent:
                     st.session_state.agent.add_adf_pipeline(pipeline)
 
                 with st.expander(f"Pipeline: **{pipeline.name}**", expanded=True):
-                    col1, col2, col3 = st.columns(3)
-                    col1.metric("Activities", len(pipeline.activities))
-                    col2.metric("Sources", len(pipeline.sources))
-                    col3.metric("Sinks", len(pipeline.sinks))
-
+                    c1, c2, c3 = st.columns(3)
+                    c1.metric("Atividades", len(pipeline.activities))
+                    c2.metric("Fontes", len(pipeline.sources))
+                    c3.metric("Destinos", len(pipeline.sinks))
                     if pipeline.description:
                         st.caption(pipeline.description)
-
-                    if pipeline.activities:
-                        st.subheader("Activities")
-                        for act in pipeline.activities:
-                            dep_str = f" → depends on: {', '.join(act.depends_on)}" if act.depends_on else ""
-                            st.markdown(f"- **{act.name}** `[{act.activity_type}]`{dep_str}")
-
-                    col_s, col_k = st.columns(2)
+                    for act in pipeline.activities:
+                        dep = f" ← {', '.join(act.depends_on)}" if act.depends_on else ""
+                        st.markdown(f"- **{act.name}** `[{act.activity_type}]`{dep}")
+                    cs, ck = st.columns(2)
                     if pipeline.sources:
-                        col_s.subheader("Sources")
-                        for s in pipeline.sources:
-                            col_s.markdown(f"- `{s}`")
+                        cs.write("**Fontes**"); [cs.code(s) for s in pipeline.sources]
                     if pipeline.sinks:
-                        col_k.subheader("Sinks")
-                        for s in pipeline.sinks:
-                            col_k.markdown(f"- `{s}`")
-
+                        ck.write("**Destinos**"); [ck.code(s) for s in pipeline.sinks]
             except Exception as e:
-                st.error(f"Failed to parse {file.name}: {e}")
+                st.error(f"Erro em {file.name}: {e}")
 
-    if st.session_state.adf_pipelines:
+    # Saved pipelines
+    saved = store.load_adf_pipelines()
+    if saved:
         st.divider()
-        st.info(f"{len(st.session_state.adf_pipelines)} pipeline(s) loaded. Ask the Copilot about them!")
+        st.info(f"{len(saved)} pipeline(s) armazenados. Pergunte ao Copilot sobre eles!")
+
+# ─────────────────────────────────────────────────────────────────────────────
+# PAGE: DW Explorer
+# ─────────────────────────────────────────────────────────────────────────────
 
 elif page == "🗄️ DW Explorer":
     st.header("🗄️ Data Warehouse Explorer")
 
-    if not st.session_state.active_connection:
-        st.warning("Connect a database first (Connections page).")
-    else:
-        connector = st.session_state.connections.get(st.session_state.active_connection)
+    if not st.session_state.connection_configs:
+        st.warning("Nenhuma conexão configurada. Vá para a aba **Conexões**.")
+        st.stop()
 
-        if st.button("Introspect Schema", use_container_width=True):
-            with st.spinner("Scanning schema..."):
-                try:
-                    tables = connector.introspect_schema()
-                    st.session_state.schema_cache[st.session_state.active_connection] = tables
-                    st.success(f"Found {len(tables)} tables.")
-                except Exception as e:
-                    st.error(f"Error: {e}")
+    # ── Database selector ──────────────────────────────────────────────────
+    all_conn_names = list(st.session_state.connection_configs.keys())
+    default_idx = (
+        all_conn_names.index(st.session_state.active_connection)
+        if st.session_state.active_connection in all_conn_names
+        else 0
+    )
+    selected_conn = st.selectbox(
+        "Banco de dados",
+        all_conn_names,
+        index=default_idx,
+        help="Selecione qual banco explorar",
+    )
 
-        tables = st.session_state.schema_cache.get(st.session_state.active_connection, [])
+    cfg = st.session_state.connection_configs[selected_conn]
+    is_live = selected_conn in st.session_state.connections
 
-        if tables:
-            from src.analyzers.dw_analyzer import DWAnalyzer
-            analyzer = DWAnalyzer(tables)
-            analyzer.classify_tables()
-            summary = analyzer.get_schema_summary()
+    st.caption(
+        f"**{cfg['db_type']}** — `{cfg.get('host','?')}/{cfg.get('database','?')}` "
+        + ("🟢 conectado" if is_live else "🔴 desconectado")
+    )
 
-            col1, col2, col3, col4 = st.columns(4)
-            col1.metric("Total Tables", summary["total_tables"])
-            col2.metric("Fact Tables", len(summary["fact_tables"]))
-            col3.metric("Dimension Tables", len(summary["dimension_tables"]))
-            col4.metric("Conformed Dims", len(summary["conformed_dimensions"]))
+    if not is_live:
+        if st.button("Reconectar", use_container_width=True):
+            with st.spinner("Reconectando..."):
+                ok = _reconnect(selected_conn)
+            if ok:
+                st.success("Reconectado!")
+                st.rerun()
+            else:
+                st.error("Falha na reconexão. Verifique as credenciais.")
+            st.stop()
+        else:
+            st.stop()
 
-            tab1, tab2, tab3, tab4 = st.tabs(["Fact Tables", "Dimension Tables", "Bus Matrix", "All Tables"])
+    connector = st.session_state.connections[selected_conn]
 
-            with tab1:
-                for tname in summary["fact_tables"]:
-                    table = next((t for t in tables if t.full_name == tname), None)
-                    if table:
-                        with st.expander(f"📊 {tname} ({table.row_count or '?'} rows)"):
-                            cols_df = [{"Column": c.name, "Type": c.data_type, "PK": c.is_primary_key, "FK": c.is_foreign_key} for c in table.columns]
-                            import pandas as pd
-                            st.dataframe(pd.DataFrame(cols_df), use_container_width=True)
+    col_btn1, col_btn2 = st.columns(2)
+    if col_btn1.button("🔍 Introspectar Schema", use_container_width=True):
+        with st.spinner("Escaneando schema..."):
+            try:
+                tables = connector.introspect_schema()
+                st.session_state.schema_cache[selected_conn] = tables
+                store.save_schema_cache(selected_conn, [t.model_dump() for t in tables])
+                st.success(f"{len(tables)} tabelas encontradas.")
+            except Exception as e:
+                st.error(f"Erro: {e}")
 
-            with tab2:
-                for tname in summary["dimension_tables"]:
-                    table = next((t for t in tables if t.full_name == tname), None)
-                    if table:
-                        with st.expander(f"📁 {tname}"):
-                            cols_df = [{"Column": c.name, "Type": c.data_type, "PK": c.is_primary_key} for c in table.columns]
-                            import pandas as pd
-                            st.dataframe(pd.DataFrame(cols_df), use_container_width=True)
+    # Load from SQLite cache if not in memory
+    if selected_conn not in st.session_state.schema_cache:
+        cached = store.load_schema_cache(selected_conn)
+        if cached:
+            from src.models.schemas import TableSchema
+            try:
+                st.session_state.schema_cache[selected_conn] = [TableSchema(**t) for t in cached]
+            except Exception:
+                pass
 
-            with tab3:
-                bus_matrix = analyzer.suggest_bus_matrix()
-                if bus_matrix:
-                    import pandas as pd
-                    df = pd.DataFrame(bus_matrix).T.fillna(False)
-                    df = df.replace({True: "✓", False: ""})
-                    st.dataframe(df, use_container_width=True)
+    tables = st.session_state.schema_cache.get(selected_conn, [])
+
+    if tables:
+        from src.analyzers.dw_analyzer import DWAnalyzer
+        analyzer = DWAnalyzer(tables)
+        analyzer.classify_tables()
+        summary = analyzer.get_schema_summary()
+
+        c1, c2, c3, c4 = st.columns(4)
+        c1.metric("Total tabelas", summary["total_tables"])
+        c2.metric("Fact tables", len(summary["fact_tables"]))
+        c3.metric("Dimensions", len(summary["dimension_tables"]))
+        c4.metric("Dims conformadas", len(summary["conformed_dimensions"]))
+
+        tab_facts, tab_dims, tab_bus, tab_all, tab_diagram, tab_sql = st.tabs(
+            ["Fact Tables", "Dimensões", "Bus Matrix", "Todas", "Diagrama ER", "SQL Playground"]
+        )
+
+        with tab_facts:
+            for tname in summary["fact_tables"]:
+                t = next((x for x in tables if x.full_name == tname), None)
+                if t:
+                    with st.expander(f"📊 {tname} ({t.row_count or '?'} linhas)"):
+                        df = pd.DataFrame([{"Coluna": c.name, "Tipo": c.data_type, "PK": c.is_primary_key, "FK": c.is_foreign_key, "Nullable": c.is_nullable} for c in t.columns])
+                        st.dataframe(df, use_container_width=True, hide_index=True)
+                        if t.foreign_keys:
+                            st.markdown("**Relacionamentos:**")
+                            for fk in t.foreign_keys:
+                                st.markdown(f"- `{fk.column}` → `{fk.referenced_table}.{fk.referenced_column}`")
+
+        with tab_dims:
+            for tname in summary["dimension_tables"]:
+                t = next((x for x in tables if x.full_name == tname), None)
+                if t:
+                    is_conformed = tname in summary["conformed_dimensions"]
+                    label = f"📁 {tname}" + (" ⭐ conformada" if is_conformed else "")
+                    with st.expander(label):
+                        df = pd.DataFrame([{"Coluna": c.name, "Tipo": c.data_type, "PK": c.is_primary_key} for c in t.columns])
+                        st.dataframe(df, use_container_width=True, hide_index=True)
+
+        with tab_bus:
+            bus = analyzer.suggest_bus_matrix()
+            if bus:
+                df_bus = pd.DataFrame(bus).T.fillna(False).replace({True: "✓", False: ""})
+                st.dataframe(df_bus, use_container_width=True)
+                if summary["conformed_dimensions"]:
+                    st.markdown("**Dimensões conformadas** (usadas em múltiplos facts):")
+                    for d in summary["conformed_dimensions"]:
+                        st.markdown(f"- `{d}`")
+            else:
+                st.info("Nenhum relacionamento fact/dim detectado ainda.")
+
+        with tab_all:
+            all_data = [
+                {
+                    "Schema": t.schema_name, "Tabela": t.table_name,
+                    "Colunas": len(t.columns), "Linhas": t.row_count or "?",
+                    "Tipo": "Fact" if t.is_fact_table else ("Dimension" if t.is_dimension_table else "Outro"),
+                }
+                for t in tables
+            ]
+            schema_filter = st.text_input("Filtrar por nome", "")
+            df_all = pd.DataFrame(all_data)
+            if schema_filter:
+                df_all = df_all[df_all["Tabela"].str.contains(schema_filter, case=False, na=False)]
+            st.dataframe(df_all, use_container_width=True, hide_index=True)
+
+        with tab_diagram:
+            st.caption("Diagrama de relacionamentos do schema (tabelas e FKs)")
+            from src.generators.diagram_generator import DiagramGenerator
+            gen = DiagramGenerator()
+            # Filter to only connected tables for readability
+            relevant = [t for t in tables if t.is_fact_table or t.is_dimension_table or t.foreign_keys]
+            if not relevant:
+                relevant = tables[:20]
+            try:
+                dot = gen.schema_relationships_dot(relevant[:30])
+                st.graphviz_chart(dot, use_container_width=True)
+            except Exception as e:
+                st.error(f"Erro ao gerar diagrama: {e}")
+
+        with tab_sql:
+            st.caption("Execute queries diretamente no banco selecionado")
+            sql_input = st.text_area(
+                "SQL",
+                height=150,
+                placeholder="SELECT TOP 10 * FROM dbo.MinhaTabela",
+                key=f"sql_playground_{selected_conn}",
+            )
+            col_run, col_exp = st.columns([1, 3])
+            if col_run.button("▶ Executar", use_container_width=True):
+                if sql_input.strip():
+                    with st.spinner("Executando..."):
+                        try:
+                            df = connector.execute_query(sql_input)
+                            st.success(f"{len(df)} linhas retornadas.")
+                            st.dataframe(df, use_container_width=True, hide_index=True)
+                            with st.expander("Exportar CSV"):
+                                st.download_button(
+                                    "Download CSV",
+                                    df.to_csv(index=False).encode("utf-8"),
+                                    "resultado.csv",
+                                    "text/csv",
+                                )
+                        except Exception as e:
+                            st.error(f"Erro: {e}")
                 else:
-                    st.info("No fact/dimension relationships detected yet.")
+                    st.warning("Digite uma query.")
 
-            with tab4:
-                import pandas as pd
-                all_data = [
-                    {
-                        "Schema": t.schema_name,
-                        "Table": t.table_name,
-                        "Columns": len(t.columns),
-                        "Rows": t.row_count or "?",
-                        "Type": "Fact" if t.is_fact_table else ("Dimension" if t.is_dimension_table else "Other"),
-                    }
-                    for t in tables
-                ]
-                st.dataframe(pd.DataFrame(all_data), use_container_width=True)
+# ─────────────────────────────────────────────────────────────────────────────
+# PAGE: Modelos Gerados
+# ─────────────────────────────────────────────────────────────────────────────
 
-elif page == "📦 Generated Models":
-    st.header("📦 Generated Models")
+elif page == "📦 Modelos Gerados":
+    st.header("📦 Modelos Gerados")
 
     agent = st.session_state.agent
-    if not agent or not agent._star_schemas:
-        st.info("No models generated yet. Use the Copilot Chat to design a datamart.")
-    else:
-        for schema_name, star_schema in agent._star_schemas.items():
-            with st.expander(f"⭐ {schema_name}", expanded=True):
-                st.subheader("Fact Table")
-                st.code(f"Table: {star_schema.fact_table.name}\nGrain: {star_schema.fact_table.grain}", language="yaml")
+    star_schemas = {}
 
-                st.subheader("Dimensions")
+    # Combine in-memory + SQLite
+    if agent:
+        star_schemas.update(agent._star_schemas)
+    for sname, sdict in store.load_star_schemas().items():
+        if sname not in star_schemas:
+            try:
+                from src.models.schemas import StarSchema
+                star_schemas[sname] = StarSchema(**sdict)
+            except Exception:
+                pass
+
+    if not star_schemas:
+        st.info("Nenhum modelo gerado ainda. Peça ao Copilot para criar um datamart.")
+        st.stop()
+
+    for schema_name, star_schema in star_schemas.items():
+        with st.expander(f"⭐ {schema_name} — {star_schema.subject_area}", expanded=True):
+
+            # Overview
+            c1, c2, c3 = st.columns(3)
+            c1.metric("Fact table", star_schema.fact_table.name)
+            c2.metric("Dimensões", len(star_schema.dimension_tables))
+            c3.metric("KPI oportunidades", len(star_schema.kpi_opportunities))
+
+            tab_overview, tab_diagram, tab_dbt, tab_ddl, tab_kpi = st.tabs(
+                ["Visão Geral", "Diagrama ER", "dbt Models", "DDL", "KPIs"]
+            )
+
+            with tab_overview:
+                st.markdown(f"**Grain:** {star_schema.fact_table.grain}")
+                st.markdown(f"**Tipo:** {star_schema.fact_table.fact_type.value}")
+                st.markdown("**Medidas:**")
+                for m in star_schema.fact_table.measures:
+                    st.markdown(f"- `{m}`")
+                st.markdown("**Dimensões:**")
                 for dim in star_schema.dimension_tables:
-                    st.markdown(f"- **{dim.name}** (SCD {dim.scd_type.value}) — {dim.description}")
+                    conformed_mark = " ⭐ conformada" if dim.conformed else ""
+                    st.markdown(f"- **{dim.name}** — SCD Type {dim.scd_type.value[-1]}{conformed_mark}")
+                    st.caption(f"  Grain: {dim.grain}")
 
-                if star_schema.kpi_opportunities:
-                    st.subheader("KPI Opportunities")
-                    for kpi in star_schema.kpi_opportunities:
-                        st.markdown(f"- {kpi}")
+            with tab_diagram:
+                from src.generators.diagram_generator import DiagramGenerator
+                diag_gen = DiagramGenerator()
+                try:
+                    dot = diag_gen.star_schema_dot(star_schema)
+                    st.graphviz_chart(dot, use_container_width=True)
+                except Exception as e:
+                    st.error(f"Erro no diagrama: {e}")
+                with st.expander("Mermaid ER (copiar para docs)"):
+                    mermaid = diag_gen.mermaid_er(star_schema)
+                    st.code(mermaid, language="text")
 
+            with tab_dbt:
                 from src.generators.dbt_generator import DBTGenerator
-                from src.generators.sql_generator import SQLGenerator
+                dbt_gen = DBTGenerator()
+                project_name = schema_name.lower().replace(" ", "_")
 
-                col1, col2 = st.columns(2)
-                if col1.button(f"Generate dbt Models", key=f"dbt_{schema_name}"):
-                    gen = DBTGenerator()
-                    project = gen.generate_project(star_schema, schema_name.lower().replace(" ", "_"))
+                if st.button(f"Gerar modelos dbt", key=f"gen_dbt_{schema_name}"):
+                    with st.spinner("Gerando..."):
+                        project = dbt_gen.generate_project(star_schema, project_name)
+
+                    st.success(f"{len(project.models)} modelos gerados!")
+
                     for model in project.models:
-                        st.subheader(f"📄 {model.name}.sql ({model.layer})")
-                        st.code(model.sql_content, language="sql")
-                        if model.schema_yaml:
-                            st.subheader(f"📄 schema.yml")
-                            st.code(model.schema_yaml, language="yaml")
+                        with st.expander(f"📄 {model.layer}/{model.name}.sql"):
+                            st.code(model.sql_content, language="sql")
+                            if model.schema_yaml:
+                                st.subheader("schema.yml")
+                                st.code(model.schema_yaml, language="yaml")
 
-                if col2.button(f"Generate DDL", key=f"ddl_{schema_name}"):
-                    gen = SQLGenerator()
-                    st.subheader("Fact Table DDL")
-                    st.code(gen.generate_fact_ddl(star_schema.fact_table), language="sql")
-                    for dim in star_schema.dimension_tables:
-                        st.subheader(f"Dimension DDL: {dim.name}")
-                        st.code(gen.generate_dimension_ddl(dim), language="sql")
+                    with st.expander("📄 sources.yml"):
+                        st.code(project.sources_yaml or "", language="yaml")
+                    with st.expander("📄 dbt_project.yml"):
+                        st.code(project.dbt_project_yaml or "", language="yaml")
+
+            with tab_ddl:
+                from src.generators.sql_generator import SQLGenerator
+                sql_gen = SQLGenerator()
+                db_type = st.radio("Dialect", ["sqlserver", "postgresql"], key=f"ddl_type_{schema_name}", horizontal=True)
+
+                st.subheader(f"CREATE TABLE {star_schema.fact_table.name}")
+                st.code(sql_gen.generate_fact_ddl(star_schema.fact_table, db_type), language="sql")
+
+                for dim in star_schema.dimension_tables:
+                    st.subheader(f"CREATE TABLE {dim.name}")
+                    st.code(sql_gen.generate_dimension_ddl(dim, db_type), language="sql")
+                    if dim.scd_type.value == "type2":
+                        with st.expander(f"SCD2 MERGE — {dim.name}"):
+                            src = dim.source_tables[0].split(".")[-1] if dim.source_tables else "source"
+                            st.code(sql_gen.generate_scd2_merge(dim, src), language="sql")
+
+            with tab_kpi:
+                if star_schema.kpi_opportunities:
+                    for kpi_name in star_schema.kpi_opportunities:
+                        st.markdown(f"- **{kpi_name}**")
+                else:
+                    st.info("Peça ao Copilot para sugerir KPIs para este datamart.")
+
+            if st.button(f"🗑️ Remover {schema_name}", key=f"del_{schema_name}"):
+                store.delete_star_schema(schema_name)
+                if agent:
+                    agent._star_schemas.pop(schema_name, None)
+                st.rerun()

@@ -215,6 +215,36 @@ TOOLS = [
             "required": ["fact_table"],
         },
     },
+    {
+        "name": "generate_er_diagram",
+        "description": "Generate an ER diagram (DOT/Graphviz format) for a star schema or the full DW schema. Returns the DOT source and a Mermaid ER diagram.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "star_schema_name": {
+                    "type": "string",
+                    "description": "Name of a previously designed star schema (optional — omit for full DW diagram)",
+                },
+            },
+            "required": [],
+        },
+    },
+    {
+        "name": "execute_sql",
+        "description": "Execute a SQL query against the connected database and return the results. Use for data exploration, validation, and KPI verification.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "sql": {"type": "string", "description": "SQL query to execute"},
+                "limit": {
+                    "type": "integer",
+                    "default": 100,
+                    "description": "Maximum rows to return",
+                },
+            },
+            "required": ["sql"],
+        },
+    },
 ]
 
 
@@ -440,6 +470,46 @@ class DatamartCopilotAgent:
                 return {
                     "sql": optimized,
                     "optimization_suggestions": suggestions,
+                }
+
+            elif tool_name == "generate_er_diagram":
+                from src.generators.diagram_generator import DiagramGenerator
+                gen = DiagramGenerator()
+                schema_name = tool_input.get("star_schema_name", "")
+                if schema_name and schema_name in self._star_schemas:
+                    star_schema = self._star_schemas[schema_name]
+                    return {
+                        "dot": gen.star_schema_dot(star_schema),
+                        "mermaid": gen.mermaid_er(star_schema),
+                        "description": (
+                            f"Star schema '{schema_name}' — "
+                            f"fact: {star_schema.fact_table.name}, "
+                            f"dimensions: {[d.name for d in star_schema.dimension_tables]}"
+                        ),
+                    }
+                else:
+                    tables = self._get_tables()
+                    if not tables:
+                        return {"error": "No schema loaded. Connect a database and introspect first."}
+                    return {
+                        "dot": gen.schema_relationships_dot(tables),
+                        "description": f"Full DW schema — {len(tables)} tables",
+                    }
+
+            elif tool_name == "execute_sql":
+                if not self._connector:
+                    return {"error": "No database connected."}
+                sql = tool_input["sql"]
+                limit = tool_input.get("limit", 100)
+                if "limit" not in sql.lower() and "top" not in sql.lower():
+                    if "select" in sql.lower():
+                        sql = sql.rstrip(";") + f" -- limited to {limit} rows"
+                df = self._connector.execute_query(sql)
+                df = df.head(limit)
+                return {
+                    "rows": df.to_dict(orient="records"),
+                    "row_count": len(df),
+                    "columns": list(df.columns),
                 }
 
         except Exception as e:
