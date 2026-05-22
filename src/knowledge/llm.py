@@ -40,6 +40,15 @@ def call_ai(prompt: str, system: str = "", max_tokens: int = MAX_OUTPUT_TOKENS) 
         raise
 
 
+def _ensure_dict(parsed: Any) -> dict[str, Any]:
+    """If the AI returned a JSON array instead of an object, wrap it."""
+    if isinstance(parsed, dict):
+        return parsed
+    if isinstance(parsed, list):
+        return {"items": parsed}
+    return {"value": parsed}
+
+
 def call_ai_json(prompt: str, system: str = "", max_tokens: int = MAX_OUTPUT_TOKENS) -> dict[str, Any]:
     """Call AI and parse JSON from the response.
 
@@ -48,6 +57,7 @@ def call_ai_json(prompt: str, system: str = "", max_tokens: int = MAX_OUTPUT_TOK
     2. Strip markdown fences (```json ... ```) then parse
     3. Brace-counting to find the outermost {...} object
     4. Bracket-counting to find the outermost [...] array
+    Always returns a dict — lists are wrapped as {"items": [...]}.
     Raises ValueError with the raw response excerpt if all strategies fail.
     """
     full_prompt = (
@@ -60,7 +70,7 @@ def call_ai_json(prompt: str, system: str = "", max_tokens: int = MAX_OUTPUT_TOK
 
     # 1. Direct parse
     try:
-        return json.loads(stripped)
+        return _ensure_dict(json.loads(stripped))
     except json.JSONDecodeError:
         pass
 
@@ -68,7 +78,7 @@ def call_ai_json(prompt: str, system: str = "", max_tokens: int = MAX_OUTPUT_TOK
     clean = re.sub(r"^```(?:json)?\s*", "", stripped, flags=re.MULTILINE)
     clean = re.sub(r"\s*```\s*$", "", clean, flags=re.MULTILINE).strip()
     try:
-        return json.loads(clean)
+        return _ensure_dict(json.loads(clean))
     except json.JSONDecodeError:
         pass
 
@@ -83,7 +93,7 @@ def call_ai_json(prompt: str, system: str = "", max_tokens: int = MAX_OUTPUT_TOK
                 depth -= 1
                 if depth == 0:
                     try:
-                        return json.loads(stripped[start : i + 1])
+                        return _ensure_dict(json.loads(stripped[start : i + 1]))
                     except json.JSONDecodeError:
                         break
 
@@ -98,7 +108,7 @@ def call_ai_json(prompt: str, system: str = "", max_tokens: int = MAX_OUTPUT_TOK
                 depth -= 1
                 if depth == 0:
                     try:
-                        return json.loads(stripped[start : i + 1])
+                        return _ensure_dict(json.loads(stripped[start : i + 1]))
                     except json.JSONDecodeError:
                         break
 

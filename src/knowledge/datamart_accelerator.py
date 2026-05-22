@@ -148,6 +148,11 @@ Gere o design completo e retorne JSON:
 
         try:
             result = call_ai_json(prompt, SYSTEM, max_tokens=3000)
+            # If the AI returned a list wrapped by _ensure_dict, try to unwrap
+            if "items" in result and isinstance(result.get("items"), list) and result["items"]:
+                first = result["items"][0]
+                if isinstance(first, dict) and "fact_table" in first:
+                    result = first
             return result
         except Exception as e:
             logger.error("Star schema design failed: %s", e)
