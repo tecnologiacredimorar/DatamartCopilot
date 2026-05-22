@@ -153,6 +153,13 @@ Gere o design completo e retorne JSON:
                 first = result["items"][0]
                 if isinstance(first, dict) and "fact_table" in first:
                     result = first
+            # Persist to SQLite so design survives page refreshes / reruns
+            if result.get("fact_table"):
+                self.brain.update_request(
+                    request_id,
+                    design_json=json.dumps(result, ensure_ascii=False),
+                    status="designing",
+                )
             return result
         except Exception as e:
             logger.error("Star schema design failed: %s", e)

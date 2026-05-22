@@ -1186,26 +1186,41 @@ elif page == "🚀 Acelerador":
 
             # ── Step: designing ─────────────────────────────────────────
             elif status == "designing":
-                # Invalidate a cached design that is a parse-failure placeholder
-                cached = st.session_state.get(f"design_{req_id}", {})
-                if "_raw" in cached or not cached.get("fact_table"):
-                    st.session_state.pop(f"design_{req_id}", None)
+                design_key = f"design_{req_id}"
 
-                if f"design_{req_id}" not in st.session_state:
-                    with st.spinner("Desenhando star schema Kimball..."):
+                # Restore from SQLite when session state is empty (page reload)
+                if design_key not in st.session_state:
+                    persisted_design = req.get("design_json", {})
+                    if persisted_design and persisted_design.get("fact_table"):
+                        st.session_state[design_key] = persisted_design
+
+                # Only call the AI when there is genuinely no design yet,
+                # or the previous attempt returned an explicit error.
+                # Do NOT invalidate just because fact_table is empty — that
+                # creates an infinite loop where every rerun pops and retriggers.
+                cached = st.session_state.get(design_key)
+                needs_generation = cached is None or "error" in cached or "_raw" in cached
+
+                if needs_generation:
+                    with st.spinner("Desenhando star schema Kimball... (pode levar ~30s)"):
                         try:
                             design = accelerator.design_star_schema(req_id, analysis or {})
                         except Exception as exc:
                             design = {"error": str(exc)}
-                        st.session_state[f"design_{req_id}"] = design
+                        st.session_state[design_key] = design
 
-                design = st.session_state.get(f"design_{req_id}", {})
+                design = st.session_state.get(design_key, {})
+
+                # Debug expander — always visible so user can see raw AI response
+                with st.expander("🔍 Debug: resposta bruta da IA", expanded=not design.get("fact_table")):
+                    st.json(design)
 
                 if design.get("error"):
                     st.error(f"Erro ao gerar design: {design['error']}")
                     if st.button("🔄 Tentar novamente"):
-                        st.session_state.pop(f"design_{req_id}", None)
+                        st.session_state.pop(design_key, None)
                         st.rerun()
+
                 elif design.get("fact_table"):
                     st.subheader("⭐ Design Star Schema")
                     fact = design["fact_table"]
@@ -1238,13 +1253,15 @@ elif page == "🚀 Acelerador":
                         st.success("Pacote gerado!")
                         st.rerun()
                     if c2.button("↩️ Refazer com ajustes", use_container_width=True):
-                        st.session_state.pop(f"design_{req_id}", None)
+                        st.session_state.pop(design_key, None)
                         brain.update_request(req_id, status="analyzing")
                         st.rerun()
+
                 else:
-                    st.warning("Design ainda sendo processado ou sem dados. Tente recarregar.")
+                    st.warning("Design retornou sem fact_table. Veja o debug acima para entender a resposta da IA.")
                     if st.button("🔄 Reprocessar"):
-                        st.session_state.pop(f"design_{req_id}", None)
+                        st.session_state.pop(design_key, None)
+                        brain.update_request(req_id, design_json=None)
                         st.rerun()
 
             # ── Step: ready ─────────────────────────────────────────────

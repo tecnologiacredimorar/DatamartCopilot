@@ -123,12 +123,14 @@ class KnowledgeBrain:
             """)
         # executescript() issues its own COMMIT, so run migrations in a fresh connection
         with self._conn() as conn:
-            try:
-                conn.execute(
-                    "ALTER TABLE kb_datamart_requests ADD COLUMN analysis_json TEXT"
-                )
-            except Exception:
-                pass  # column already exists
+            for col_sql in (
+                "ALTER TABLE kb_datamart_requests ADD COLUMN analysis_json TEXT",
+                "ALTER TABLE kb_datamart_requests ADD COLUMN design_json TEXT",
+            ):
+                try:
+                    conn.execute(col_sql)
+                except Exception:
+                    pass  # column already exists
 
     # ── DW Tables ──────────────────────────────────────────────────────────
 
@@ -389,11 +391,16 @@ class KnowledgeBrain:
         if not row:
             return None
         d = dict(row)
-        for field, default in (("clarification_qa", "[]"), ("artifacts", "{}"), ("analysis_json", "{}")):
+        for field, default in (
+            ("clarification_qa", "[]"),
+            ("artifacts", "{}"),
+            ("analysis_json", "{}"),
+            ("design_json", "{}"),
+        ):
             try:
                 d[field] = json.loads(d[field] or default)
             except Exception:
-                d[field] = {} if field in ("artifacts", "analysis_json") else []
+                d[field] = {} if field != "clarification_qa" else []
         return d
 
     def get_all_requests(self) -> list[dict[str, Any]]:
