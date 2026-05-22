@@ -5,7 +5,7 @@ import logging
 from typing import Any, Optional
 
 from .brain import KnowledgeBrain
-from .llm import call_ai_json, call_ai
+from .llm import call_ai_json, call_ai, _extract_json_object
 
 logger = logging.getLogger(__name__)
 
@@ -104,59 +104,38 @@ Máximo 3 perguntas. Só pergunte o que é realmente ambíguo."""
         if qa_pairs:
             qa_text = "\n".join(f"P: {q['question']}\nR: {q['answer']}" for q in qa_pairs)
 
-        prompt = f"""## Solicitação
-{req['description_raw']}
+        analysis_ctx = json.dumps(
+            {k: v for k, v in analysis.items() if k != "perguntas"},
+            ensure_ascii=False,
+        )[:1200]
 
-## Análise prévia
-{json.dumps({k: v for k, v in analysis.items() if k != 'perguntas'}, ensure_ascii=False, indent=2)[:1200]}
+        # Describe the required structure in plain text — embedding a JSON template
+        # confuses the model into returning only a fragment (e.g. just the measures array).
+        prompt = f"""Projete um star schema Kimball completo para a demanda abaixo.
 
-## Respostas às perguntas
-{qa_text or "Sem perguntas pendentes."}
+DEMANDA: {req['description_raw']}
 
-## Tarefa: Design Kimball Star Schema
+CONTEXTO E ANÁLISE PRÉVIA:
+{analysis_ctx}
 
-ATENÇÃO: Retorne SOMENTE o objeto JSON completo abaixo.
-NÃO retorne arrays soltos, sub-listas, ou partes do JSON.
-O JSON DEVE começar com {{ e terminar com }}.
-NÃO use markdown fences.
+RESPOSTAS CONFIRMADAS DO NEGÓCIO:
+{qa_text or "(nenhuma pergunta foi feita)"}
 
-{{
-  "fact_table": {{
-    "name": "fact_nome",
-    "grain": "uma linha por ...",
-    "type": "transaction|periodic_snapshot|accumulating_snapshot",
-    "measures": [
-      {{"name": "col", "type": "DECIMAL(18,2)", "aggregation": "SUM", "description": "..."}}
-    ],
-    "degenerate_dimensions": ["col_que_fica_no_fact"],
-    "source_tables": ["schema.tabela"]
-  }},
-  "dimensions": [
-    {{
-      "name": "dim_nome",
-      "grain": "uma linha por ...",
-      "scd_type": 1,
-      "columns": [
-        {{"name": "col", "type": "VARCHAR(100)", "role": "natural_key|attribute|scd_tracking"}}
-      ],
-      "source_tables": ["schema.tabela"],
-      "conformed": true,
-      "rationale": "por que SCD tipo X"
-    }}
-  ],
-  "indexes": ["CREATE INDEX ... (recomendação de performance)"],
-  "kimball_notes": "decisões e rationale Kimball importantes",
-  "merge_with_existing": null,
-  "merge_rationale": "por que pode/não pode mergear"
-}}"""
+INSTRUÇÃO DE SAÍDA:
+Retorne SOMENTE um objeto JSON válido. Não escreva texto antes ou depois.
+O JSON deve ter EXATAMENTE estas chaves no nível raiz:
+  "fact_table"  — objeto com: name (string), grain (string), type (transaction|periodic_snapshot|accumulating_snapshot), measures (array de objetos com name/type/aggregation/description), degenerate_dimensions (array de strings), source_tables (array de strings)
+  "dimensions"  — array de objetos, cada um com: name, grain, scd_type (1|2|3), columns (array com name/type/role), source_tables, conformed (bool), rationale (string)
+  "indexes"     — array de strings com comandos CREATE INDEX recomendados
+  "kimball_notes" — string com decisões e rationale Kimball
+  "merge_with_existing" — nome de datamart existente para mesclar, ou null
+  "merge_rationale"    — justificativa da decisão de mesclar ou não
+
+Use nomes reais do domínio, não placeholders. Dimensões conformed devem ter conformed: true."""
 
         try:
-            result = call_ai_json(prompt, SYSTEM, max_tokens=4000)
-            # If the AI returned a list wrapped by _ensure_dict, try to unwrap
-            if "items" in result and isinstance(result.get("items"), list) and result["items"]:
-                first = result["items"][0]
-                if isinstance(first, dict) and "fact_table" in first:
-                    result = first
+            raw = call_ai(prompt, SYSTEM, max_tokens=4000)
+            result = _extract_json_object(raw)
             # Persist to SQLite so design survives page refreshes / reruns
             if result.get("fact_table"):
                 self.brain.update_request(
@@ -164,6 +143,15 @@ NÃO use markdown fences.
                     design_json=json.dumps(result, ensure_ascii=False),
                     status="designing",
                 )
+            else:
+                snippet = raw[:400].replace("\n", " ")
+                logger.error("design_star_schema: fact_table missing. Raw: %s", snippet)
+                return {
+                    "error": (
+                        "A IA não retornou um star schema completo. "
+                        f"Início da resposta: {snippet}"
+                    )
+                }
             return result
         except Exception as e:
             logger.error("Star schema design failed: %s", e)

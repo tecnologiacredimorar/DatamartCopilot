@@ -49,6 +49,63 @@ def _ensure_dict(parsed: Any) -> dict[str, Any]:
     return {"value": parsed}
 
 
+def _extract_json_object(raw: str) -> dict[str, Any]:
+    """Extract a JSON object from raw AI text using the same 4-strategy cascade
+    as call_ai_json, but without appending any extra instruction to the prompt.
+    Use this when the prompt already contains complete instructions and you want
+    to avoid call_ai_json double-instructing the model.
+    Raises ValueError if no valid JSON object can be found.
+    """
+    stripped = raw.strip()
+
+    # 1. Direct parse
+    try:
+        return _ensure_dict(json.loads(stripped))
+    except json.JSONDecodeError:
+        pass
+
+    # 2. Strip markdown fences
+    clean = re.sub(r"^```(?:json)?\s*", "", stripped, flags=re.MULTILINE)
+    clean = re.sub(r"\s*```\s*$", "", clean, flags=re.MULTILINE).strip()
+    try:
+        return _ensure_dict(json.loads(clean))
+    except json.JSONDecodeError:
+        pass
+
+    # 3. Brace-count: find outermost {...}
+    start = stripped.find("{")
+    if start != -1:
+        depth = 0
+        for i, ch in enumerate(stripped[start:], start):
+            if ch == "{":
+                depth += 1
+            elif ch == "}":
+                depth -= 1
+                if depth == 0:
+                    try:
+                        return _ensure_dict(json.loads(stripped[start : i + 1]))
+                    except json.JSONDecodeError:
+                        break
+
+    # 4. Bracket-count: find outermost [...]
+    start = stripped.find("[")
+    if start != -1:
+        depth = 0
+        for i, ch in enumerate(stripped[start:], start):
+            if ch == "[":
+                depth += 1
+            elif ch == "]":
+                depth -= 1
+                if depth == 0:
+                    try:
+                        return _ensure_dict(json.loads(stripped[start : i + 1]))
+                    except json.JSONDecodeError:
+                        break
+
+    logger.error("_extract_json_object failed. Raw (first 500):\n%s", raw[:500])
+    raise ValueError(f"Não foi possível extrair JSON da resposta. Início: {raw[:300]}")
+
+
 def call_ai_json(prompt: str, system: str = "", max_tokens: int = MAX_OUTPUT_TOKENS) -> dict[str, Any]:
     """Call AI and parse JSON from the response.
 
