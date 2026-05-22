@@ -4,6 +4,67 @@ from src.models.schemas import DimensionTable, FactTable, SCDType, StarSchema, T
 
 
 class DiagramGenerator:
+    def design_dict_dot(self, design: dict) -> str:
+        """Generate a Graphviz DOT diagram from the accelerator's raw design dict."""
+        fact = design.get("fact_table", {})
+        dims = design.get("dimensions", [])
+
+        fact_name = fact.get("name", "FactTable")
+        fact_type = fact.get("type", "transaction")
+        measures = fact.get("measures", [])
+
+        measure_names = [
+            (m.get("name", "?") if isinstance(m, dict) else str(m))
+            for m in measures[:8]
+        ]
+
+        lines = [
+            "digraph star_schema {",
+            '    graph [rankdir=LR fontname="Arial" bgcolor="#f8f9fa"];',
+            '    node  [fontname="Arial" fontsize=11];',
+            '    edge  [fontsize=9 color="#555555"];',
+            "",
+        ]
+
+        fact_rows = "<BR/>".join(f"&#x25CF; {m}" for m in measure_names) or "(sem medidas)"
+        fact_label = (
+            f'<<TABLE BORDER="1" CELLBORDER="0" CELLSPACING="2" BGCOLOR="#4A90D9">'
+            f'<TR><TD ALIGN="CENTER"><FONT COLOR="white"><B>{fact_name}</B></FONT><BR/>'
+            f'<FONT COLOR="#d0e8ff" POINT-SIZE="9">FACT — {fact_type}</FONT></TD></TR>'
+            f'<TR><TD ALIGN="LEFT"><FONT COLOR="white" POINT-SIZE="9">{fact_rows}</FONT></TD></TR>'
+            f'</TABLE>>'
+        )
+        lines.append(f'    "{fact_name}" [shape=plain label={fact_label}];')
+        lines.append("")
+
+        scd_colors = {"1": "#F5A623", "2": "#7ED321", "3": "#9B59B6",
+                      1: "#F5A623", 2: "#7ED321", 3: "#9B59B6"}
+        for dim in dims:
+            dim_name = dim.get("name", "Dim")
+            scd = dim.get("scd_type", 1)
+            color = scd_colors.get(scd, "#F5A623")
+            cols = dim.get("columns", [])
+            col_names = [
+                (c.get("name", "?") if isinstance(c, dict) else str(c))
+                for c in cols[:6]
+            ]
+            col_rows = "<BR/>".join(f"&#x25B8; {c}" for c in col_names) or "&nbsp;"
+            dim_label = (
+                f'<<TABLE BORDER="1" CELLBORDER="0" CELLSPACING="2" BGCOLOR="{color}">'
+                f'<TR><TD ALIGN="CENTER"><FONT COLOR="white"><B>{dim_name}</B></FONT><BR/>'
+                f'<FONT COLOR="white" POINT-SIZE="9">DIM — SCD Type {scd}</FONT></TD></TR>'
+                f'<TR><TD ALIGN="LEFT"><FONT POINT-SIZE="9">{col_rows}</FONT></TD></TR>'
+                f'</TABLE>>'
+            )
+            lines.append(f'    "{dim_name}" [shape=plain label={dim_label}];')
+            lines.append(
+                f'    "{dim_name}" -> "{fact_name}" [arrowhead=crow arrowtail=none dir=back];'
+            )
+            lines.append("")
+
+        lines.append("}")
+        return "\n".join(lines)
+
     def star_schema_dot(self, star_schema: StarSchema) -> str:
         fact = star_schema.fact_table
         lines = [

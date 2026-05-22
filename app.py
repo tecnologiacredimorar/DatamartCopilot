@@ -1096,7 +1096,8 @@ elif page == "🚀 Acelerador":
 
     with tab_new:
         requests = brain.get_all_requests()
-        active = [r for r in requests if r["status"] not in ("ready", "delivered")]
+        # Include "ready" so the artifacts view is reachable after approval
+        active = [r for r in requests if r["status"] not in ("delivered",)]
         in_progress = active[0] if active else None
 
         if in_progress:
@@ -1258,6 +1259,15 @@ elif page == "🚀 Acelerador":
 
                     if design.get("kimball_notes"):
                         st.info(f"**Notas Kimball:** {design['kimball_notes']}")
+
+                    # Star schema diagram
+                    st.markdown("**Diagrama:**")
+                    try:
+                        from src.generators.diagram_generator import DiagramGenerator
+                        dot = DiagramGenerator().design_dict_dot(design)
+                        st.graphviz_chart(dot, use_container_width=True)
+                    except Exception as _diag_err:
+                        st.caption(f"Diagrama indisponível: {_diag_err}")
 
                     c1, c2 = st.columns(2)
                     if c1.button("✅ Aprovar design e gerar pacote", use_container_width=True):
