@@ -373,6 +373,9 @@ class KnowledgeBrain:
         return cur.lastrowid
 
     def update_request(self, request_id: int, **fields) -> None:
+        # Drop None values — passing None would attempt to SET a column to NULL
+        # which crashes if the column doesn't exist yet (e.g. before migration).
+        fields = {k: v for k, v in fields.items() if v is not None}
         if not fields:
             return
         set_clause = ", ".join(f"{k}=?" for k in fields)

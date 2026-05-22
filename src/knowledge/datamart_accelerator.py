@@ -115,7 +115,11 @@ Máximo 3 perguntas. Só pergunte o que é realmente ambíguo."""
 
 ## Tarefa: Design Kimball Star Schema
 
-Gere o design completo e retorne JSON:
+ATENÇÃO: Retorne SOMENTE o objeto JSON completo abaixo.
+NÃO retorne arrays soltos, sub-listas, ou partes do JSON.
+O JSON DEVE começar com {{ e terminar com }}.
+NÃO use markdown fences.
+
 {{
   "fact_table": {{
     "name": "fact_nome",
@@ -147,7 +151,7 @@ Gere o design completo e retorne JSON:
 }}"""
 
         try:
-            result = call_ai_json(prompt, SYSTEM, max_tokens=3000)
+            result = call_ai_json(prompt, SYSTEM, max_tokens=4000)
             # If the AI returned a list wrapped by _ensure_dict, try to unwrap
             if "items" in result and isinstance(result.get("items"), list) and result["items"]:
                 first = result["items"][0]

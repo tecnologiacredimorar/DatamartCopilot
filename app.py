@@ -31,6 +31,8 @@ def get_brain():
 
 store = get_store()
 brain = get_brain()
+# Always run schema migrations on startup — safe even if columns already exist
+brain._init_tables()
 
 # ─── Session state — load from SQLite on first run ────────────────────────────
 
@@ -1261,7 +1263,6 @@ elif page == "🚀 Acelerador":
                     st.warning("Design retornou sem fact_table. Veja o debug acima para entender a resposta da IA.")
                     if st.button("🔄 Reprocessar"):
                         st.session_state.pop(design_key, None)
-                        brain.update_request(req_id, design_json=None)
                         st.rerun()
 
             # ── Step: ready ─────────────────────────────────────────────
