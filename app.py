@@ -1213,9 +1213,23 @@ elif page == "🚀 Acelerador":
 
                 design = st.session_state.get(design_key, {})
 
-                # Debug expander — always visible so user can see raw AI response
-                with st.expander("🔍 Debug: resposta bruta da IA", expanded=not design.get("fact_table")):
-                    st.json(design)
+                # Debug expander — always visible; shows full raw response when available
+                has_fact = bool(design.get("fact_table"))
+                with st.expander("🔍 Debug: resposta da IA", expanded=not has_fact):
+                    raw_resp = design.get("_raw_response")
+                    if raw_resp:
+                        st.caption(f"Tamanho da resposta: {len(raw_resp)} chars")
+                        st.text_area("Resposta bruta completa da IA", raw_resp, height=300)
+                    else:
+                        st.json({k: v for k, v in design.items() if k != "_raw_response"})
+
+                # Cancel button available from any sub-state
+                if not has_fact:
+                    if st.button("🗑️ Cancelar e iniciar nova demanda", key="cancel_design"):
+                        brain.update_request(req_id, status="delivered")
+                        for k in (design_key, f"analysis_{req_id}", f"artifacts_{req_id}"):
+                            st.session_state.pop(k, None)
+                        st.rerun()
 
                 if design.get("error"):
                     st.error(f"Erro ao gerar design: {design['error']}")
@@ -1260,8 +1274,8 @@ elif page == "🚀 Acelerador":
                         st.rerun()
 
                 else:
-                    st.warning("Design retornou sem fact_table. Veja o debug acima para entender a resposta da IA.")
-                    if st.button("🔄 Reprocessar"):
+                    st.warning("Design retornou sem fact_table. Veja o debug acima para a resposta completa da IA.")
+                    if st.button("🔄 Reprocessar design"):
                         st.session_state.pop(design_key, None)
                         st.rerun()
 
