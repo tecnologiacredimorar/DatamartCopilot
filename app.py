@@ -389,52 +389,186 @@ elif page == "📋 ADF Analyzer":
     st.header("📋 Azure Data Factory — Analisador de Pipelines")
 
     uploaded = st.file_uploader(
-        "Faça upload dos JSON de pipelines ADF",
+        "Faça upload do template ARM (deploymentTemplate.json) ou JSONs individuais de pipeline",
         type="json",
         accept_multiple_files=True,
     )
-    run_ai = st.checkbox("Analisar com IA automaticamente ao fazer upload", value=True)
+    run_ai = st.checkbox("Analisar pipelines com IA automaticamente ao fazer upload", value=True)
 
     if uploaded:
         from src.connectors.adf_parser import ADFParser
         from src.knowledge.adf_ai_analyzer import ADFAIAnalyzer
+        from src.models.schemas import ADFFactory
         parser = ADFParser()
         ai_analyzer = ADFAIAnalyzer(brain)
 
         for file in uploaded:
             try:
                 content = json.loads(file.read())
-                pipeline = parser.parse_pipeline(content)
-                st.session_state.adf_pipelines.append(pipeline)
-                store.save_adf_pipeline(pipeline.name, pipeline.model_dump())
-                brain.save_adf_pipeline(pipeline.name, content)
-                if st.session_state.agent:
-                    st.session_state.agent.add_adf_pipeline(pipeline)
 
-                with st.expander(f"Pipeline: **{pipeline.name}**", expanded=True):
-                    c1, c2, c3 = st.columns(3)
-                    c1.metric("Atividades", len(pipeline.activities))
-                    c2.metric("Fontes", len(pipeline.sources))
-                    c3.metric("Destinos", len(pipeline.sinks))
-                    if pipeline.description:
-                        st.caption(pipeline.description)
-                    for act in pipeline.activities:
-                        dep = f" ← {', '.join(act.depends_on)}" if act.depends_on else ""
-                        st.markdown(f"- **{act.name}** `[{act.activity_type}]`{dep}")
+                # ── ARM deployment template ───────────────────────────────────
+                if parser.is_arm_template(content):
+                    factory = parser.parse_arm_template(content)
 
-                    if run_ai and st.session_state.api_key:
-                        with st.spinner(f"IA analisando {pipeline.name}..."):
-                            try:
-                                analysis = ai_analyzer.analyze_and_save(pipeline.name, content)
-                                st.success("Análise salva no Cérebro!")
-                                st.markdown(f"**O que faz:** {analysis.get('business_description','?')}")
-                                st.markdown(f"**Estratégia:** `{analysis.get('load_strategy','?')}`")
-                                if analysis.get("problems_found"):
-                                    st.warning("**Problemas:** " + " | ".join(analysis["problems_found"]))
-                                if analysis.get("suggestions"):
-                                    st.info("**Sugestões:** " + " | ".join(analysis["suggestions"]))
-                            except Exception as e:
-                                st.warning(f"Análise IA falhou: {e}")
+                    st.success(f"Template ARM detectado: **{factory.factory_name}**")
+
+                    # Summary metrics
+                    mc = st.columns(5)
+                    mc[0].metric("Linked Services", len(factory.linked_services))
+                    mc[1].metric("Datasets", len(factory.datasets))
+                    mc[2].metric("Pipelines", len(factory.pipelines))
+                    mc[3].metric("Dataflows", len(factory.dataflows))
+                    mc[4].metric("Triggers", len(factory.triggers))
+
+                    # Linked services
+                    with st.expander("🔗 Linked Services", expanded=True):
+                        for ls in factory.linked_services:
+                            host_info = f" → `{ls.host}/{ls.database}`" if ls.host else ""
+                            st.markdown(f"- **{ls.name}** `[{ls.service_type}]`{host_info}")
+                        # Persist linked service info to brain context
+                        ls_summary = "\n".join(
+                            f"- {ls.name} ({ls.service_type}): {ls.host or '?'}/{ls.database or '?'}"
+                            for ls in factory.linked_services
+                        )
+                        brain.save_context(
+                            "adf_linked_services",
+                            f"factory_{factory.factory_name}",
+                            f"Factory {factory.factory_name} — Linked Services:\n{ls_summary}",
+                            source="adf_import",
+                        )
+
+                    # Datasets
+                    with st.expander(f"📂 Datasets ({len(factory.datasets)})", expanded=False):
+                        for ds in factory.datasets:
+                            tbl = f"{ds.schema_name}.{ds.table_name}" if ds.schema_name else ds.table_name or "?"
+                            st.markdown(f"- **{ds.name}** `[{ds.dataset_type}]` → `{tbl}` via `{ds.linked_service}`")
+
+                    # Triggers
+                    with st.expander("⏰ Triggers", expanded=True):
+                        for trig in factory.triggers:
+                            pipes = ", ".join(trig.pipelines) if trig.pipelines else "?"
+                            rec = ""
+                            if trig.recurrence:
+                                freq = trig.recurrence.get("frequency", "")
+                                interval = trig.recurrence.get("interval", "")
+                                rec = f" ({interval}x {freq})"
+                            st.markdown(f"- **{trig.name}** `[{trig.trigger_type}]`{rec} → {pipes}")
+
+                    # Pipelines
+                    st.subheader("Pipelines")
+                    for pipeline in factory.pipelines:
+                        st.session_state.adf_pipelines.append(pipeline)
+                        store.save_adf_pipeline(pipeline.name, pipeline.model_dump())
+                        brain.save_adf_pipeline(pipeline.name, pipeline.raw_json or {})
+                        if st.session_state.agent:
+                            st.session_state.agent.add_adf_pipeline(pipeline)
+
+                        with st.expander(f"Pipeline: **{pipeline.name}**", expanded=False):
+                            pc1, pc2, pc3, pc4 = st.columns(4)
+                            pc1.metric("Atividades", len(pipeline.activities))
+                            pc2.metric("Fontes", len(pipeline.sources))
+                            pc3.metric("Destinos", len(pipeline.sinks))
+                            pc4.metric("Queries SQL", len(pipeline.embedded_queries))
+                            if pipeline.description:
+                                st.caption(pipeline.description)
+                            for act in pipeline.activities:
+                                dep = f" ← {', '.join(act.depends_on)}" if act.depends_on else ""
+                                st.markdown(f"- **{act.name}** `[{act.activity_type}]`{dep}")
+                            if pipeline.embedded_queries:
+                                with st.expander("Queries SQL embutidas"):
+                                    for qname, sql in pipeline.embedded_queries.items():
+                                        st.markdown(f"**{qname}:**")
+                                        st.code(sql, language="sql")
+                            if run_ai and st.session_state.api_key:
+                                with st.spinner(f"IA analisando {pipeline.name}..."):
+                                    try:
+                                        analysis = ai_analyzer.analyze_and_save(
+                                            pipeline.name, pipeline.raw_json or {}
+                                        )
+                                        st.success("Análise salva no Cérebro!")
+                                        st.markdown(f"**O que faz:** {analysis.get('business_description','?')}")
+                                        st.markdown(f"**Estratégia:** `{analysis.get('load_strategy','?')}`")
+                                        if analysis.get("problems_found"):
+                                            st.warning("**Problemas:** " + " | ".join(analysis["problems_found"]))
+                                        if analysis.get("suggestions"):
+                                            st.info("**Sugestões:** " + " | ".join(analysis["suggestions"]))
+                                    except Exception as e:
+                                        st.warning(f"Análise IA falhou: {e}")
+
+                    # Dataflows
+                    st.subheader("Dataflows")
+                    for df in factory.dataflows:
+                        with st.expander(f"Dataflow: **{df.name}**", expanded=False):
+                            dc1, dc2, dc3 = st.columns(3)
+                            dc1.metric("Fontes", len(df.sources))
+                            dc2.metric("Destinos", len(df.sinks))
+                            dc3.metric("Transformações", len(df.transformations))
+                            if df.sources:
+                                st.markdown("**Fontes:** " + ", ".join(f"`{s}`" for s in df.sources))
+                            if df.sinks:
+                                st.markdown("**Destinos:** " + ", ".join(f"`{s}`" for s in df.sinks))
+                            if df.transformations:
+                                st.markdown("**Transformações:** " + ", ".join(f"`{t}`" for t in df.transformations))
+                            if df.embedded_queries:
+                                with st.expander("Queries SQL embutidas"):
+                                    for qname, sql in df.embedded_queries.items():
+                                        st.markdown(f"**{qname}:**")
+                                        st.code(sql, language="sql")
+                            if df.script_lines:
+                                with st.expander("Script ADF completo"):
+                                    st.code("\n".join(df.script_lines), language="text")
+                            # Persist dataflow to brain as pipeline entry
+                            df_raw = {
+                                "name": df.name,
+                                "properties": {
+                                    "description": df.description,
+                                    "sources": df.sources,
+                                    "sinks": df.sinks,
+                                    "transformations": df.transformations,
+                                    "embedded_queries": df.embedded_queries,
+                                    "script_lines": df.script_lines[:30],
+                                },
+                            }
+                            brain.save_adf_pipeline(f"df_{df.name}", df_raw)
+
+                # ── Individual pipeline JSON ──────────────────────────────────
+                else:
+                    pipeline = parser.parse_pipeline(content)
+                    st.session_state.adf_pipelines.append(pipeline)
+                    store.save_adf_pipeline(pipeline.name, pipeline.model_dump())
+                    brain.save_adf_pipeline(pipeline.name, content)
+                    if st.session_state.agent:
+                        st.session_state.agent.add_adf_pipeline(pipeline)
+
+                    with st.expander(f"Pipeline: **{pipeline.name}**", expanded=True):
+                        c1, c2, c3, c4 = st.columns(4)
+                        c1.metric("Atividades", len(pipeline.activities))
+                        c2.metric("Fontes", len(pipeline.sources))
+                        c3.metric("Destinos", len(pipeline.sinks))
+                        c4.metric("Queries SQL", len(pipeline.embedded_queries))
+                        if pipeline.description:
+                            st.caption(pipeline.description)
+                        for act in pipeline.activities:
+                            dep = f" ← {', '.join(act.depends_on)}" if act.depends_on else ""
+                            st.markdown(f"- **{act.name}** `[{act.activity_type}]`{dep}")
+                        if pipeline.embedded_queries:
+                            with st.expander("Queries SQL embutidas"):
+                                for qname, sql in pipeline.embedded_queries.items():
+                                    st.markdown(f"**{qname}:**")
+                                    st.code(sql, language="sql")
+                        if run_ai and st.session_state.api_key:
+                            with st.spinner(f"IA analisando {pipeline.name}..."):
+                                try:
+                                    analysis = ai_analyzer.analyze_and_save(pipeline.name, content)
+                                    st.success("Análise salva no Cérebro!")
+                                    st.markdown(f"**O que faz:** {analysis.get('business_description','?')}")
+                                    st.markdown(f"**Estratégia:** `{analysis.get('load_strategy','?')}`")
+                                    if analysis.get("problems_found"):
+                                        st.warning("**Problemas:** " + " | ".join(analysis["problems_found"]))
+                                    if analysis.get("suggestions"):
+                                        st.info("**Sugestões:** " + " | ".join(analysis["suggestions"]))
+                                except Exception as e:
+                                    st.warning(f"Análise IA falhou: {e}")
             except Exception as e:
                 st.error(f"Erro em {file.name}: {e}")
 

@@ -26,6 +26,9 @@ class ADFAIAnalyzer:
         # Compact pipeline for token budget
         props = pipeline_raw.get("properties", {})
         activities = props.get("activities", [])
+        # Include embedded SQL queries extracted by the parser
+        embedded_queries = pipeline_raw.get("embedded_queries", {})
+
         compact = {
             "name": pipeline_raw.get("name", pipeline_name),
             "description": props.get("description", ""),
@@ -36,10 +39,16 @@ class ADFAIAnalyzer:
                     "depends_on": [d.get("activity", "") for d in a.get("dependsOn", [])],
                     "inputs": [i.get("referenceName", "") for i in a.get("inputs", [])],
                     "outputs": [o.get("referenceName", "") for o in a.get("outputs", [])],
+                    "source_query": a.get("typeProperties", {}).get("source", {}).get("sqlReaderQuery", "")[:300] or None,
+                    "precopy_script": a.get("typeProperties", {}).get("sink", {}).get("preCopyScript", "")[:200] or None,
                 }
                 for a in activities[:20]
             ],
         }
+        if embedded_queries:
+            compact["embedded_sql_queries"] = {
+                k: v[:300] for k, v in list(embedded_queries.items())[:5]
+            }
 
         # Keep context short to stay under 4000 tokens
         ctx_snippet = brain_ctx[:800] if brain_ctx else ""
@@ -48,7 +57,7 @@ class ADFAIAnalyzer:
 {ctx_snippet}
 
 Pipeline ADF para analisar:
-{json.dumps(compact, ensure_ascii=False, indent=2)[:2000]}
+{json.dumps(compact, ensure_ascii=False, indent=2)[:2200]}
 
 Analise e retorne JSON com exatamente estas chaves:
 {{

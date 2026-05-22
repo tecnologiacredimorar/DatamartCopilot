@@ -94,7 +94,44 @@ class ADFPipeline(BaseModel):
     variables: dict[str, Any] = Field(default_factory=dict)
     sources: list[str] = Field(default_factory=list)
     sinks: list[str] = Field(default_factory=list)
+    embedded_queries: dict[str, str] = Field(default_factory=dict)  # activity_name -> SQL
     raw_json: Optional[dict[str, Any]] = None
+
+
+class ADFLinkedService(BaseModel):
+    name: str
+    service_type: str
+    host: Optional[str] = None
+    database: Optional[str] = None
+    description: Optional[str] = None
+    properties: dict[str, Any] = Field(default_factory=dict)
+
+
+class ADFDataflow(BaseModel):
+    name: str
+    description: Optional[str] = None
+    sources: list[str] = Field(default_factory=list)
+    sinks: list[str] = Field(default_factory=list)
+    transformations: list[str] = Field(default_factory=list)
+    script_lines: list[str] = Field(default_factory=list)
+    embedded_queries: dict[str, str] = Field(default_factory=dict)  # source_name -> SQL
+
+
+class ADFTrigger(BaseModel):
+    name: str
+    trigger_type: str
+    pipelines: list[str] = Field(default_factory=list)
+    recurrence: Optional[dict[str, Any]] = None
+    description: Optional[str] = None
+
+
+class ADFFactory(BaseModel):
+    factory_name: str
+    linked_services: list[ADFLinkedService] = Field(default_factory=list)
+    datasets: list[ADFDataset] = Field(default_factory=list)
+    pipelines: list[ADFPipeline] = Field(default_factory=list)
+    dataflows: list[ADFDataflow] = Field(default_factory=list)
+    triggers: list[ADFTrigger] = Field(default_factory=list)
 
 
 class DimensionColumn(BaseModel):
