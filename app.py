@@ -33,6 +33,8 @@ def _init_state() -> None:
         return
 
     st.session_state.initialized = True
+    # Remove any stale api_key from SQLite (legacy — keys must not be persisted)
+    store.set_setting("api_key", "")
     st.session_state.connections = {}          # name -> connector instance
     st.session_state.connection_configs = {}   # name -> config dict (for display)
     st.session_state.active_connection = None
@@ -40,7 +42,8 @@ def _init_state() -> None:
     st.session_state.messages = store.load_messages()
     st.session_state.schema_cache = {}
     st.session_state.generated_models = []
-    st.session_state.api_key = store.get_setting("api_key", os.getenv("ANTHROPIC_API_KEY", ""))
+    # API key: env var only — never persist to SQLite
+    st.session_state.api_key = os.getenv("ANTHROPIC_API_KEY", "")
     st.session_state.agent = None
 
     # Restore saved connection configs (don't auto-connect — just restore metadata)
@@ -117,8 +120,15 @@ with st.sidebar:
     )
     if api_key_input != st.session_state.api_key:
         st.session_state.api_key = api_key_input
-        st.session_state.agent = None
-        store.set_setting("api_key", api_key_input)
+        st.session_state.agent = None  # force recreation with new key
+
+    # Visual feedback on key status
+    if st.session_state.api_key and st.session_state.api_key.startswith("sk-ant-"):
+        st.caption("🟢 Chave configurada")
+    elif st.session_state.api_key:
+        st.caption("🔴 Chave parece inválida (deve começar com `sk-ant-`)")
+    else:
+        st.caption("⚠️ Sem chave — defina ANTHROPIC_API_KEY no .env ou acima")
 
     st.divider()
     page = st.radio(
@@ -217,7 +227,20 @@ if page == "💬 Copilot Chat":
                         response_placeholder.markdown(full_response + "▌")
                     response_placeholder.markdown(full_response)
                 except Exception as e:
-                    full_response = f"Erro: {e}"
+                    err_str = str(e)
+                    if "401" in err_str or "authentication_error" in err_str or "invalid x-api-key" in err_str:
+                        full_response = (
+                            "**Erro de autenticação (401):** A chave da Anthropic API é inválida.\n\n"
+                            "**Como corrigir:**\n"
+                            "1. Copie sua chave em [console.anthropic.com](https://console.anthropic.com)\n"
+                            "2. Cole no campo **Anthropic API Key** na barra lateral\n"
+                            "3. A chave deve começar com `sk-ant-`\n\n"
+                            "Ou defina `ANTHROPIC_API_KEY=sk-ant-...` no arquivo `.env` e reinicie o app."
+                        )
+                        # Reset agent so it's recreated with the corrected key
+                        st.session_state.agent = None
+                    else:
+                        full_response = f"**Erro:** {err_str}"
                     response_placeholder.error(full_response)
 
         st.session_state.messages.append({"role": "assistant", "content": full_response})
