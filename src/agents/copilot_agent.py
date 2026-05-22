@@ -249,7 +249,7 @@ TOOLS = [
 
 
 class DatamartCopilotAgent:
-    def __init__(self, api_key: str):
+    def __init__(self, api_key: str, brain=None):
         self.client = anthropic.Anthropic(api_key=api_key)
         self.model = "claude-opus-4-7"
         self._connectors: dict[str, AzureSQLConnector | PostgreSQLConnector] = {}
@@ -258,6 +258,15 @@ class DatamartCopilotAgent:
         self._cached_tables: Optional[list[TableSchema]] = None
         self._star_schemas: dict[str, Any] = {}
         self.conversation_history: list[dict[str, Any]] = []
+        self._brain = brain  # KnowledgeBrain instance — injected from app
+
+    def _build_system_prompt(self) -> str:
+        """Build dynamic system prompt injecting brain context."""
+        if self._brain:
+            brain_ctx = self._brain.build_ai_context()
+            if brain_ctx and not brain_ctx.startswith("(Cérebro"):
+                return SYSTEM_PROMPT + f"\n\n---\n\n{brain_ctx}"
+        return SYSTEM_PROMPT
 
     def add_connector(
         self,
@@ -499,11 +508,12 @@ class DatamartCopilotAgent:
             elif tool_name == "execute_sql":
                 if not self._connector:
                     return {"error": "No database connected."}
-                sql = tool_input["sql"]
+                sql = tool_input["sql"].rstrip(";")
                 limit = tool_input.get("limit", 100)
-                if "limit" not in sql.lower() and "top" not in sql.lower():
-                    if "select" in sql.lower():
-                        sql = sql.rstrip(";") + f" -- limited to {limit} rows"
+                sql_upper = sql.upper()
+                if "SELECT" in sql_upper and "TOP " not in sql_upper and "LIMIT " not in sql_upper:
+                    # Inject TOP for SQL Server; pandas .head() as fallback for Postgres
+                    sql = sql.replace("SELECT ", f"SELECT TOP {limit} ", 1)
                 df = self._connector.execute_query(sql)
                 df = df.head(limit)
                 return {
@@ -526,7 +536,7 @@ class DatamartCopilotAgent:
                 system=[
                     {
                         "type": "text",
-                        "text": SYSTEM_PROMPT,
+                        "text": self._build_system_prompt(),
                         "cache_control": {"type": "ephemeral"},
                     }
                 ],
