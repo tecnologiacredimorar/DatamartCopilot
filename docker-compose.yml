@@ -1,0 +1,35 @@
+# Docker Compose para desenvolvimento local.
+# Produção (Azure App Service) usará a imagem diretamente — sem compose.
+#
+# Pré-requisito: copie .env.example para .env e preencha as variáveis.
+#   cp .env.example .env
+
+services:
+  api:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: datamart-copilot-api:dev
+    ports:
+      - "8000:8000"
+    env_file:
+      - .env                  # nunca comitado — está no .gitignore
+    volumes:
+      # Monta o código-fonte para hot-reload sem reconstruir a imagem.
+      # Remove este bloco em produção.
+      - .:/app
+      # Isola o banco SQLite do container (não sobrescreve o do host)
+      - /app/datamart_copilot.db
+    command: >
+      uvicorn api.main:app
+        --host 0.0.0.0
+        --port 8000
+        --reload
+        --reload-dir api
+        --reload-dir src
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s

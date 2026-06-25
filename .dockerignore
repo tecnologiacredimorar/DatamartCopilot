@@ -1,0 +1,41 @@
+# Controle de versão
+.git
+.gitignore
+
+# Ambientes virtuais Python
+.venv
+venv
+env
+.env
+
+# Bytecode Python
+__pycache__
+*.pyc
+*.pyo
+*.pyd
+.Python
+
+# Banco de dados local (criado em runtime, não vai para a imagem)
+*.db
+datamart_copilot.db
+
+# Dependências de frontend (não há por enquanto, mas por precaução)
+node_modules
+
+# Arquivos de IDE e SO
+.DS_Store
+.idea
+.vscode
+*.swp
+*.swo
+
+# Documentação e arquivos de metadados (não necessários no container)
+docs/
+README.md
+CLAUDE.md
+
+# Docker próprio (sem sentido copiar para dentro da imagem)
+Dockerfile
+.dockerignore
+docker-compose.yml
+docker-compose.override.yml

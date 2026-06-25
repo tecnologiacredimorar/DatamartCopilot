@@ -31,13 +31,20 @@ class AzureSQLConnector:
         self._engine: Optional[Engine] = None
 
     def connect(self) -> None:
-        conn_str = (
-            f"mssql+pyodbc://{self.username}:{self.password}"
-            f"@{self.server}/{self.database}"
-            f"?driver={self.driver.replace(' ', '+')}"
-            f"&Encrypt=yes&TrustServerCertificate=no&Connection+Timeout=30"
+        import urllib.parse
+        # Build ODBC string with {PWD=...} braces so special chars (#, @, etc.)
+        # are treated as literals by pyodbc — then percent-encode the whole thing
+        # for SQLAlchemy's odbc_connect query param.
+        odbc_params = (
+            f"DRIVER={{{self.driver}}};"
+            f"SERVER={self.server};"
+            f"DATABASE={self.database};"
+            f"UID={self.username};"
+            f"PWD={{{self.password}}};"
+            "Encrypt=yes;TrustServerCertificate=no;Connection Timeout=30;"
         )
-        self._engine = create_engine(conn_str, pool_pre_ping=True, pool_size=5)
+        conn_url = "mssql+pyodbc:///?odbc_connect=" + urllib.parse.quote_plus(odbc_params)
+        self._engine = create_engine(conn_url, pool_pre_ping=True, pool_size=5)
         with self._engine.connect() as conn:
             conn.execute(text("SELECT 1"))
         logger.info("Connected to Azure SQL: %s/%s", self.server, self.database)

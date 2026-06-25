@@ -22,7 +22,7 @@ from src.models.schemas import (
 
 logger = logging.getLogger(__name__)
 
-SYSTEM_PROMPT = """You are DataMart Copilot — an expert data warehouse architect and engineer specializing in Kimball dimensional modeling methodology. Your mission is to accelerate datamart development at Credimorar by providing intelligent guidance, generating optimized SQL, and designing star schemas.
+SYSTEM_PROMPT = """You are DataMart Copilot — an expert data warehouse architect and engineer specializing in Kimball dimensional modeling methodology. Your mission is to accelerate datamart development at Credimorar — a financing company (financiamento) — by providing intelligent guidance, generating optimized SQL, and designing star schemas.
 
 ## Your Expertise
 
@@ -215,11 +215,41 @@ TOOLS = [
             "required": ["fact_table"],
         },
     },
+    {
+        "name": "generate_er_diagram",
+        "description": "Generate an ER diagram (DOT/Graphviz format) for a star schema or the full DW schema. Returns the DOT source and a Mermaid ER diagram.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "star_schema_name": {
+                    "type": "string",
+                    "description": "Name of a previously designed star schema (optional — omit for full DW diagram)",
+                },
+            },
+            "required": [],
+        },
+    },
+    {
+        "name": "execute_sql",
+        "description": "Execute a SQL query against the connected database and return the results. Use for data exploration, validation, and KPI verification.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "sql": {"type": "string", "description": "SQL query to execute"},
+                "limit": {
+                    "type": "integer",
+                    "default": 100,
+                    "description": "Maximum rows to return",
+                },
+            },
+            "required": ["sql"],
+        },
+    },
 ]
 
 
 class DatamartCopilotAgent:
-    def __init__(self, api_key: str):
+    def __init__(self, api_key: str, brain=None):
         self.client = anthropic.Anthropic(api_key=api_key)
         self.model = "claude-opus-4-7"
         self._connectors: dict[str, AzureSQLConnector | PostgreSQLConnector] = {}
@@ -228,6 +258,15 @@ class DatamartCopilotAgent:
         self._cached_tables: Optional[list[TableSchema]] = None
         self._star_schemas: dict[str, Any] = {}
         self.conversation_history: list[dict[str, Any]] = []
+        self._brain = brain  # KnowledgeBrain instance — injected from app
+
+    def _build_system_prompt(self) -> str:
+        """Build dynamic system prompt injecting brain context."""
+        if self._brain:
+            brain_ctx = self._brain.build_ai_context()
+            if brain_ctx and not brain_ctx.startswith("(Cérebro"):
+                return SYSTEM_PROMPT + f"\n\n---\n\n{brain_ctx}"
+        return SYSTEM_PROMPT
 
     def add_connector(
         self,
@@ -442,6 +481,47 @@ class DatamartCopilotAgent:
                     "optimization_suggestions": suggestions,
                 }
 
+            elif tool_name == "generate_er_diagram":
+                from src.generators.diagram_generator import DiagramGenerator
+                gen = DiagramGenerator()
+                schema_name = tool_input.get("star_schema_name", "")
+                if schema_name and schema_name in self._star_schemas:
+                    star_schema = self._star_schemas[schema_name]
+                    return {
+                        "dot": gen.star_schema_dot(star_schema),
+                        "mermaid": gen.mermaid_er(star_schema),
+                        "description": (
+                            f"Star schema '{schema_name}' — "
+                            f"fact: {star_schema.fact_table.name}, "
+                            f"dimensions: {[d.name for d in star_schema.dimension_tables]}"
+                        ),
+                    }
+                else:
+                    tables = self._get_tables()
+                    if not tables:
+                        return {"error": "No schema loaded. Connect a database and introspect first."}
+                    return {
+                        "dot": gen.schema_relationships_dot(tables),
+                        "description": f"Full DW schema — {len(tables)} tables",
+                    }
+
+            elif tool_name == "execute_sql":
+                if not self._connector:
+                    return {"error": "No database connected."}
+                sql = tool_input["sql"].rstrip(";")
+                limit = tool_input.get("limit", 100)
+                sql_upper = sql.upper()
+                if "SELECT" in sql_upper and "TOP " not in sql_upper and "LIMIT " not in sql_upper:
+                    # Inject TOP for SQL Server; pandas .head() as fallback for Postgres
+                    sql = sql.replace("SELECT ", f"SELECT TOP {limit} ", 1)
+                df = self._connector.execute_query(sql)
+                df = df.head(limit)
+                return {
+                    "rows": df.to_dict(orient="records"),
+                    "row_count": len(df),
+                    "columns": list(df.columns),
+                }
+
         except Exception as e:
             logger.exception("Tool %s failed", tool_name)
             return {"error": str(e)}
@@ -456,7 +536,7 @@ class DatamartCopilotAgent:
                 system=[
                     {
                         "type": "text",
-                        "text": SYSTEM_PROMPT,
+                        "text": self._build_system_prompt(),
                         "cache_control": {"type": "ephemeral"},
                     }
                 ],
